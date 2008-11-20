@@ -1,6 +1,7 @@
 /*
 **
 ** Copyright 2007, The Android Open Source Project
+** Copyright 2008 Wind River Systems
 **
 ** Licensed under the Apache License, Version 2.0 (the "License"); 
 ** you may not use this file except in compliance with the License. 
@@ -24,7 +25,7 @@
 #include <utils/String8.h>
 
 #include "AudioHardwareStub.h"
-#include "AudioHardwareGeneric.h"
+#include "AudioHardwareALSA.h"
 
 // #define DUMP_FLINGER_OUT        // if defined allows recording samples in a file
 #ifdef DUMP_FLINGER_OUT
@@ -92,19 +93,8 @@ AudioHardwareInterface* AudioHardwareInterface::create()
     AudioHardwareInterface* hw = 0;
     char value[PROPERTY_VALUE_MAX];
 
-#ifdef GENERIC_AUDIO
-    hw = new AudioHardwareGeneric();
-#else
-    // if running in emulation - use the emulator driver
-    if (property_get("ro.kernel.qemu", value, 0)) {
-        LOGD("Running in emulation - using generic audio driver");
-        hw = new AudioHardwareGeneric();
-    }
-    else {
-        LOGV("Creating Vendor Specific AudioHardware");
-        hw = createAudioHardware();
-    }
-#endif
+    hw = new AudioHardwareALSA();
+
     if (hw->initCheck() != NO_ERROR) {
         LOGW("Using stubbed audio hardware. No sound will be produced.");
         delete hw;
