@@ -1,19 +1,19 @@
 /* AudioHardwareALSA.cpp
-**
-** Copyright 2008 Wind River Systems
-**
-** Licensed under the Apache License, Version 2.0 (the "License");
-** you may not use this file except in compliance with the License.
-** You may obtain a copy of the License at
-**
-**     http://www.apache.org/licenses/LICENSE-2.0
-**
-** Unless required by applicable law or agreed to in writing, software
-** distributed under the License is distributed on an "AS IS" BASIS,
-** WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-** See the License for the specific language governing permissions and
-** limitations under the License.
-*/
+ **
+ ** Copyright 2008-2009 Wind River Systems
+ **
+ ** Licensed under the Apache License, Version 2.0 (the "License");
+ ** you may not use this file except in compliance with the License.
+ ** You may obtain a copy of the License at
+ **
+ **     http://www.apache.org/licenses/LICENSE-2.0
+ **
+ ** Unless required by applicable law or agreed to in writing, software
+ ** distributed under the License is distributed on an "AS IS" BASIS,
+ ** WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ ** See the License for the specific language governing permissions and
+ ** limitations under the License.
+ */
 
 #include <errno.h>
 #include <stdarg.h>
@@ -30,39 +30,54 @@
 
 #include <cutils/properties.h>
 #include <media/AudioRecord.h>
-#include <hardware/power.h>
+#include <hardware_legacy/power.h>
 
 #include <alsa/asoundlib.h>
 #include "AudioHardwareALSA.h"
 
 #define SND_MIXER_VOL_RANGE_MIN  (0)
-#define SND_MIXER_VOL_RANGE_MAX  (1000)
+#define SND_MIXER_VOL_RANGE_MAX  (100)
 
-extern "C" {
+#define ALSA_NAME_MAX 128
 
-extern int ffs(int i);
+#define ALSA_STRCAT(x,y) \
+    if (strlen(x) + strlen(y) < ALSA_NAME_MAX) \
+        strcat(x, y);
 
-//
-// Make sure this prototype is consistent with what's in
-// external/libasound/alsa-lib-1.0.16/src/pcm/pcm_null.c!
-//
-extern int snd_pcm_null_open(snd_pcm_t **pcmp,
-                             const char *name,
-                             snd_pcm_stream_t stream,
-                             int mode);
-
-//
-// Function for dlsym() to look up for creating a new AudioHardwareInterface.
-//
-android::AudioHardwareInterface *createAudioHardware(void)
+extern "C"
 {
-    return new android::AudioHardwareALSA();
-}
 
-} // extern "C"
+    extern int ffs(int i);
 
+    //
+    // Make sure this prototype is consistent with what's in
+    // external/libasound/alsa-lib-1.0.16/src/pcm/pcm_null.c!
+    //
+    extern int snd_pcm_null_open(snd_pcm_t **pcmp,
+                                 const char *name,
+                                 snd_pcm_stream_t stream,
+                                 int mode);
 
-namespace android {
+    //
+    // Function for dlsym() to look up for creating a new AudioHardwareInterface.
+    //
+    android::AudioHardwareInterface *createAudioHardware(void) {
+        return new android::AudioHardwareALSA();
+    }
+
+}         // extern "C"
+
+namespace android
+{
+
+typedef AudioSystem::audio_routes audio_routes;
+
+#define ROUTE_ALL            AudioSystem::ROUTE_ALL
+#define ROUTE_EARPIECE       AudioSystem::ROUTE_EARPIECE
+#define ROUTE_SPEAKER        AudioSystem::ROUTE_SPEAKER
+#define ROUTE_BLUETOOTH_SCO  AudioSystem::ROUTE_BLUETOOTH_SCO
+#define ROUTE_HEADSET        AudioSystem::ROUTE_HEADSET
+#define ROUTE_BLUETOOTH_A2DP AudioSystem::ROUTE_BLUETOOTH_A2DP
 
 // ----------------------------------------------------------------------------
 
@@ -89,52 +104,68 @@ static void ALSAErrorHandler(const char *file,
 
 // ----------------------------------------------------------------------------
 
-struct alsa_properties_t {
-	const char *propName;
-	const char *propDefault;
-};
-
-static const alsa_properties_t masterPlaybackProp = {
-	"alsa.mixer.playback.master", "PCM"
-};
-
-static const alsa_properties_t masterCaptureProp = {
-	"alsa.mixer.capture.master", "Capture"
-};
-
 /* The following table(s) need to match in order of the route bits
  */
 static const char *deviceSuffix[] = {
-	/* ROUTE_EARPIECE  */ "_Earpiece",
-    /* ROUTE_SPEAKER   */ "_Speaker",
-    /* ROUTE_BLUETOOTH */ "_Bluetooth",
-    /* ROUTE_HEADSET   */ "_Headset",
+    /* ROUTE_EARPIECE       */ "_Earpiece",
+    /* ROUTE_SPEAKER        */ "_Speaker",
+    /* ROUTE_BLUETOOTH_SCO  */ "_Bluetooth",
+    /* ROUTE_HEADSET        */ "_Headset",
+    /* ROUTE_BLUETOOTH_A2DP */ "_Bluetooth-A2DP",
 };
 
 static const int deviceSuffixLen = (sizeof(deviceSuffix) / sizeof(char *));
 
-static const alsa_properties_t
-	mixerMasterProp[SND_PCM_STREAM_LAST+1] =
+struct mixer_info_t;
+
+struct alsa_properties_t
 {
-	{ "alsa.mixer.playback.master",  "PCM" },
-	{ "alsa.mixer.capture.master",   "Capture" }
+    const audio_routes  routes;
+    const char         *propName;
+    const char         *propDefault;
+    mixer_info_t       *mInfo;
 };
 
-static const alsa_properties_t
-	mixerProp[SND_PCM_STREAM_LAST+1][ALSAMixer::MIXER_LAST+1] =
-{
+static alsa_properties_t masterPlaybackProp = {
+    ROUTE_ALL, "alsa.mixer.playback.master", "PCM", NULL
+};
+
+static alsa_properties_t masterCaptureProp = {
+    ROUTE_ALL, "alsa.mixer.capture.master", "Capture", NULL
+};
+
+static alsa_properties_t
+mixerMasterProp[SND_PCM_STREAM_LAST+1] = {
+    { ROUTE_ALL, "alsa.mixer.playback.master",  "PCM",     NULL},
+    { ROUTE_ALL, "alsa.mixer.capture.master",   "Capture", NULL}
+};
+
+static alsa_properties_t
+mixerProp[][SND_PCM_STREAM_LAST+1] = {
     {
-    	{"alsa.mixer.playback.earpiece",  "Earpiece"},
-		{"alsa.mixer.playback.speaker",   "Speaker"},
-		{"alsa.mixer.playback.bluetooth", "Bluetooth"},
-		{"alsa.mixer.playback.headset",   "Headphone"}
-	},
-	{
-		{"alsa.mixer.capture.earpiece",  "Capture"},
-		{"alsa.mixer.capture.speaker",   ""},
-		{"alsa.mixer.capture.bluetooth", "Bluetooth Capture"},
-		{"alsa.mixer.capture.headset",   "Capture"}
-	}
+        {ROUTE_EARPIECE,       "alsa.mixer.playback.earpiece",       "Earpiece", NULL},
+        {ROUTE_EARPIECE,       "alsa.mixer.capture.earpiece",        "Capture",  NULL}
+    },
+    {
+        {ROUTE_SPEAKER,        "alsa.mixer.playback.speaker",        "Speaker", NULL},
+        {ROUTE_SPEAKER,        "alsa.mixer.capture.speaker",         "",        NULL}
+    },
+    {
+        {ROUTE_BLUETOOTH_SCO,  "alsa.mixer.playback.bluetooth.sco",  "Bluetooth",         NULL},
+        {ROUTE_BLUETOOTH_SCO,  "alsa.mixer.capture.bluetooth.sco",   "Bluetooth Capture", NULL}
+    },
+    {
+        {ROUTE_HEADSET,        "alsa.mixer.playback.headset",        "Headphone", NULL},
+        {ROUTE_HEADSET,        "alsa.mixer.capture.headset",         "Capture",   NULL}
+    },
+    {
+        {ROUTE_BLUETOOTH_A2DP, "alsa.mixer.playback.bluetooth.a2dp", "Bluetooth A2DP",         NULL},
+        {ROUTE_BLUETOOTH_A2DP, "alsa.mixer.capture.bluetooth.a2dp",  "Bluetooth A2DP Capture", NULL}
+    },
+    {
+        {static_cast<audio_routes>(0), NULL, NULL, NULL},
+        {static_cast<audio_routes>(0), NULL, NULL, NULL}
+    }
 };
 
 // ----------------------------------------------------------------------------
@@ -156,16 +187,16 @@ AudioHardwareALSA::~AudioHardwareALSA()
 
 status_t AudioHardwareALSA::initCheck()
 {
-	if (mMixer && mMixer->isValid())
-		return NO_ERROR;
-	else
-		return NO_INIT;
+    if (mMixer && mMixer->isValid())
+        return NO_ERROR;
+    else
+        return NO_INIT;
 }
 
 status_t AudioHardwareALSA::standby()
 {
-	if (mOutput)
-		return mOutput->standby();
+    if (mOutput)
+        return mOutput->standby();
 
     return NO_ERROR;
 }
@@ -173,62 +204,75 @@ status_t AudioHardwareALSA::standby()
 status_t AudioHardwareALSA::setVoiceVolume(float volume)
 {
     // The voice volume is used by the VOICE_CALL audio stream.
-	if (mMixer)
-		return mMixer->setVolume(ALSAMixer::MIXER_EARPIECE, volume);
-	else
-		return INVALID_OPERATION;
+    if (mMixer)
+        return mMixer->setVolume(ROUTE_EARPIECE, volume);
+    else
+        return INVALID_OPERATION;
 }
 
 status_t AudioHardwareALSA::setMasterVolume(float volume)
 {
-	if (mMixer)
-		return mMixer->setMasterVolume(volume);
-	else
-		return INVALID_OPERATION;
+    if (mMixer)
+        return mMixer->setMasterVolume(volume);
+    else
+        return INVALID_OPERATION;
 }
 
-AudioStreamOut *AudioHardwareALSA::openOutputStream(int      format,
-                                                    int      channelCount,
-                                                    uint32_t sampleRate)
+AudioStreamOut *
+AudioHardwareALSA::openOutputStream(int format,
+                                    int channelCount,
+                                    uint32_t sampleRate,
+                                    status_t *status)
 {
     AutoMutex lock(mLock);
 
     // only one output stream allowed
-    if (mOutput)
+    if (mOutput) {
+        *status = ALREADY_EXISTS;
         return 0;
+    }
 
     AudioStreamOutALSA *out = new AudioStreamOutALSA(this);
 
-    if (out->set(format, channelCount, sampleRate) == NO_ERROR) {
+    *status = out->set(format, channelCount, sampleRate);
+
+    if (*status == NO_ERROR) {
         mOutput = out;
         // Some information is expected to be available immediately after
         // the device is open.
-	    uint32_t routes = mRoutes[mMode];
+        uint32_t routes = mRoutes[mMode];
         mOutput->setDevice(mMode, routes);
-    } else {
+    }
+    else {
         delete out;
     }
 
     return mOutput;
 }
 
-AudioStreamIn *AudioHardwareALSA::openInputStream(int      format,
-                                                  int      channelCount,
-                                                  uint32_t sampleRate)
+AudioStreamIn *
+AudioHardwareALSA::openInputStream(int      format,
+                                   int      channelCount,
+                                   uint32_t sampleRate,
+                                   status_t *status)
 {
     AutoMutex lock(mLock);
 
     // only one input stream allowed
-    if (mInput)
+    if (mInput) {
+        *status = ALREADY_EXISTS;
         return 0;
+    }
 
     AudioStreamInALSA *in = new AudioStreamInALSA(this);
 
-    if (in->set(format, channelCount, sampleRate) == NO_ERROR) {
+    *status = in->set(format, channelCount, sampleRate);
+    if (*status == NO_ERROR) {
         mInput = in;
         // Now, actually open the device. Only 1 route used
         mInput->setDevice(0, 0);
-    } else {
+    }
+    else {
         delete in;
     }
     return mInput;
@@ -249,22 +293,16 @@ status_t AudioHardwareALSA::doRouting()
 
 status_t AudioHardwareALSA::setMicMute(bool state)
 {
-	ALSAMixer::mixer_types mixer_type =
-		static_cast<ALSAMixer::mixer_types>(ffs(AudioSystem::ROUTE_EARPIECE) - 1);
-
     if (mMixer)
-        return mMixer->setCaptureMuteState(mixer_type, state);
+        return mMixer->setCaptureMuteState(ROUTE_EARPIECE, state);
 
     return NO_INIT;
 }
 
 status_t AudioHardwareALSA::getMicMute(bool *state)
 {
-	ALSAMixer::mixer_types mixer_type =
-		static_cast<ALSAMixer::mixer_types>(ffs(AudioSystem::ROUTE_EARPIECE) - 1);
-
     if (mMixer)
-        return mMixer->getCaptureMuteState(mixer_type, state);
+        return mMixer->getCaptureMuteState(ROUTE_EARPIECE, state);
 
     return NO_ERROR;
 }
@@ -281,7 +319,7 @@ ALSAStreamOps::ALSAStreamOps() :
     mHardwareParams(0),
     mSoftwareParams(0),
     mMode(-1),
-    mDevice(-1)
+    mDevice(0)
 {
     if (snd_pcm_hw_params_malloc(&mHardwareParams) < 0) {
         LOG_ALWAYS_FATAL("Failed to allocate ALSA hardware parameters!");
@@ -294,7 +332,7 @@ ALSAStreamOps::ALSAStreamOps() :
 
 ALSAStreamOps::~ALSAStreamOps()
 {
-	AutoMutex lock(mLock);
+    AutoMutex lock(mLock);
 
     close();
 
@@ -316,23 +354,24 @@ status_t ALSAStreamOps::set(int      format,
         mDefaults->sampleRate = rate;
 
     switch(format) {
-    case AudioSystem::DEFAULT:  // format == 0
-        break;
+      // format == 0
+        case AudioSystem::DEFAULT:
+            break;
 
-    case AudioSystem::PCM_16_BIT:
-        mDefaults->format = SND_PCM_FORMAT_S16_LE;
-        break;
+        case AudioSystem::PCM_16_BIT:
+            mDefaults->format = SND_PCM_FORMAT_S16_LE;
+            break;
 
-    case AudioSystem::PCM_8_BIT:
-        mDefaults->format = SND_PCM_FORMAT_S8;
-        break;
+        case AudioSystem::PCM_8_BIT:
+            mDefaults->format = SND_PCM_FORMAT_S8;
+            break;
 
-    default:
-        LOGE("Unknown PCM format %i. Forcing default", format);
-        break;
+        default:
+            LOGE("Unknown PCM format %i. Forcing default", format);
+            break;
     }
 
-	return NO_ERROR;
+    return NO_ERROR;
 }
 
 uint32_t ALSAStreamOps::sampleRate() const
@@ -344,7 +383,7 @@ uint32_t ALSAStreamOps::sampleRate() const
         return NO_INIT;
 
     return snd_pcm_hw_params_get_rate(mHardwareParams, &rate, 0) < 0
-           ? 0 : static_cast<uint32_t>(rate);
+        ? 0 : static_cast<uint32_t>(rate);
 }
 
 status_t ALSAStreamOps::sampleRate(uint32_t rate)
@@ -365,7 +404,7 @@ status_t ALSAStreamOps::sampleRate(uint32_t rate)
 
     if (err < 0) {
         LOGE("Unable to set %s sample rate to %u: %s",
-             stream, rate, snd_strerror(err));
+            stream, rate, snd_strerror(err));
         return BAD_VALUE;
     }
     if (requestedRate != rate) {
@@ -373,8 +412,9 @@ status_t ALSAStreamOps::sampleRate(uint32_t rate)
         // This may cause resampling problems; i.e. PCM playback will be too
         // slow or fast.
         LOGW("Requested rate (%u HZ) does not match actual rate (%u HZ)",
-             rate, requestedRate);
-    } else {
+            rate, requestedRate);
+    }
+    else {
         LOGD("Set %s sample rate to %u HZ", stream, requestedRate);
     }
     return NO_ERROR;
@@ -385,19 +425,20 @@ status_t ALSAStreamOps::sampleRate(uint32_t rate)
 //
 size_t ALSAStreamOps::bufferSize() const
 {
-    snd_pcm_uframes_t periodSize;
     int err;
 
     if (!mHandle)
         return -1;
 
-    err = snd_pcm_hw_params_get_period_size(mHardwareParams,
-                                            &periodSize,
-                                            0);
+    snd_pcm_uframes_t bufferSize = 0;
+    snd_pcm_uframes_t periodSize = 0;
+
+    err = snd_pcm_get_params(mHandle, &bufferSize, &periodSize);
+
     if (err < 0)
         return -1;
 
-    return static_cast<size_t>(snd_pcm_frames_to_bytes(mHandle, periodSize));
+    return static_cast<size_t>(snd_pcm_frames_to_bytes(mHandle, bufferSize));
 }
 
 int ALSAStreamOps::format() const
@@ -415,18 +456,17 @@ int ALSAStreamOps::format() const
 
     pcmFormatBitWidth = snd_pcm_format_physical_width(ALSAFormat);
     audioSystemFormat = AudioSystem::DEFAULT;
-    switch(pcmFormatBitWidth)
-    {
-    case 8:
-        audioSystemFormat = AudioSystem::PCM_8_BIT;
-        break;
+    switch(pcmFormatBitWidth) {
+        case 8:
+            audioSystemFormat = AudioSystem::PCM_8_BIT;
+            break;
 
-    case 16:
-        audioSystemFormat = AudioSystem::PCM_16_BIT;
-        break;
+        case 16:
+            audioSystemFormat = AudioSystem::PCM_16_BIT;
+            break;
 
-    default:
-        LOG_FATAL("Unknown AudioSystem bit width %i!", pcmFormatBitWidth);
+        default:
+            LOG_FATAL("Unknown AudioSystem bit width %i!", pcmFormatBitWidth);
     }
 
     return audioSystemFormat;
@@ -443,15 +483,14 @@ int ALSAStreamOps::channelCount() const
     err = snd_pcm_hw_params_get_channels(mHardwareParams, &val);
     if (err < 0) {
         LOGE("Unable to get device channel count: %s",
-             snd_strerror(err));
+            snd_strerror(err));
         return -1;
     }
 
     return val;
 }
 
-status_t ALSAStreamOps::channelCount(int channels)
-{
+status_t ALSAStreamOps::channelCount(int channels) {
     int err;
 
     if (!mHandle)
@@ -460,62 +499,50 @@ status_t ALSAStreamOps::channelCount(int channels)
     err = snd_pcm_hw_params_set_channels(mHandle, mHardwareParams, channels);
     if (err < 0) {
         LOGE("Unable to set channel count to %i: %s",
-             channels, snd_strerror(err));
+            channels, snd_strerror(err));
         return BAD_VALUE;
     }
 
     LOGD("Using %i %s for %s.",
-         channels, channels == 1 ? "channel" : "channels", streamName());
+        channels, channels == 1 ? "channel" : "channels", streamName());
 
     return NO_ERROR;
 }
 
-status_t ALSAStreamOps::open(int mode, int device)
+status_t ALSAStreamOps::open(int mode, uint32_t device)
 {
     const char *stream = streamName();
     const char *devName = deviceName(mode, device);
 
     int         err;
 
-    // The PCM stream is opened in blocking mode, per ALSA defaults.  The
-    // AudioFlinger seems to assume blocking mode too, so asynchronous mode
-    // should not be used.
-    if ((err = snd_pcm_open(&mHandle, devName, mDefaults->direction, 0)) < 0) {
+    for(;;) {
+        // The PCM stream is opened in blocking mode, per ALSA defaults.  The
+        // AudioFlinger seems to assume blocking mode too, so asynchronous mode
+        // should not be used.
+        err = snd_pcm_open(&mHandle, devName, mDefaults->direction, 0);
+        if (err == 0) break;
 
-        // Try without the mode.
-        devName  = deviceName(AudioSystem::MODE_INVALID, device);
+        // See if there is a less specific name we can try.
+        // Note: We are changing the contents of a const char * here.
+        char *tail = strrchr(devName, '_');
+        if (! tail) break;
+        *tail = 0;
+    }
 
+    if (err < 0) {
+        // None of the Android defined audio devices exist. Open a generic one.
+        devName = "hw:00,0";
         err = snd_pcm_open(&mHandle, devName, mDefaults->direction, 0);
         if (err < 0) {
-
- 	       // Try without mode or device.
- 	       devName  = deviceName(AudioSystem::MODE_INVALID, -1);
-
- 	       err = snd_pcm_open(&mHandle, devName, mDefaults->direction, 0);
- 	       if (err < 0) {
-
-		        err = snd_pcm_open(&mHandle, "hw:00,0", mDefaults->direction, 0);
-
-		        if (err < 0) {
-		            LOGE("Unable to open fallback %s device: %s",
-		                 stream, snd_strerror(err));
-
-		            // Last resort is the NULL device (i.e. the bit bucket).
-				    err = snd_pcm_null_open(&mHandle, _nullALSADeviceName,
-											mDefaults->direction, 0);
-				    if (err < 0) {
-				        LOG_FATAL("Unable to open NULL ALSA device: %s",
-				                  snd_strerror(err));
-				    }
-				    LOGD("Opened NULL %s device.", streamName());
-				    return err;
-		        }
-	        }
+            // Last resort is the NULL device (i.e. the bit bucket).
+            devName = _nullALSADeviceName;
+            err = snd_pcm_open(&mHandle, devName, mDefaults->direction, 0);
         }
     }
 
-	mMode   = mode;
-	mDevice = device;
+    mMode   = mode;
+    mDevice = device;
 
     LOGI("Initialized ALSA %s device %s", stream, devName);
     return err;
@@ -523,13 +550,13 @@ status_t ALSAStreamOps::open(int mode, int device)
 
 void ALSAStreamOps::close()
 {
-	snd_pcm_t *handle = mHandle;
+    snd_pcm_t *handle = mHandle;
     mHandle = NULL;
 
     if (handle) {
         snd_pcm_close(handle);
-	    mMode   = -1;
-	    mDevice = -1;
+        mMode   = -1;
+        mDevice = 0;
     }
 }
 
@@ -558,18 +585,19 @@ status_t ALSAStreamOps::setSoftwareParams()
         // For playback, configure ALSA to start the transfer when the
         // buffer is almost full.
         startThreshold = (bufferSize / periodSize) * periodSize;
-    } else {
+    }
+    else {
         // For recording, configure ALSA to start the transfer on the
         // first frame.
         startThreshold = 1;
     }
 
     err = snd_pcm_sw_params_set_start_threshold(mHandle,
-                                                mSoftwareParams,
-                                                startThreshold);
+        mSoftwareParams,
+        startThreshold);
     if (err < 0) {
         LOGE("Unable to set start threshold to %lu frames: %s",
-             startThreshold, snd_strerror(err));
+            startThreshold, snd_strerror(err));
         return NO_INIT;
     }
 
@@ -579,7 +607,7 @@ status_t ALSAStreamOps::setSoftwareParams()
                                                bufferSize);
     if (err < 0) {
         LOGE("Unable to set stop threshold to %lu frames: %s",
-             bufferSize, snd_strerror(err));
+            bufferSize, snd_strerror(err));
         return NO_INIT;
     }
 
@@ -590,7 +618,7 @@ status_t ALSAStreamOps::setSoftwareParams()
                                           periodSize);
     if (err < 0) {
         LOGE("Unable to configure available minimum to %lu: %s",
-             periodSize, snd_strerror(err));
+            periodSize, snd_strerror(err));
         return NO_INIT;
     }
 
@@ -598,7 +626,7 @@ status_t ALSAStreamOps::setSoftwareParams()
     err = snd_pcm_sw_params(mHandle, mSoftwareParams);
     if (err < 0) {
         LOGE("Unable to configure software parameters: %s",
-             snd_strerror(err));
+            snd_strerror(err));
         return NO_INIT;
     }
 
@@ -624,7 +652,7 @@ status_t ALSAStreamOps::setPCMFormat(snd_pcm_format_t format)
     err = snd_pcm_hw_params_set_format(mHandle, mHardwareParams, format);
     if (err < 0) {
         LOGE("Unable to configure PCM format %s (%s): %s",
-             formatName, formatDesc, snd_strerror(err));
+            formatName, formatDesc, snd_strerror(err));
         return NO_INIT;
     }
 
@@ -641,8 +669,8 @@ status_t ALSAStreamOps::setHardwareResample(bool resample)
                                               static_cast<int>(resample));
     if (err < 0) {
         LOGE("Unable to %s hardware resampling: %s",
-             resample ? "enable" : "disable",
-             snd_strerror(err));
+            resample ? "enable" : "disable",
+            snd_strerror(err));
         return NO_INIT;
     }
     return NO_ERROR;
@@ -676,7 +704,7 @@ status_t ALSAStreamOps::setDevice(int mode, uint32_t device)
     const char *stream = streamName();
 
     status_t    status = open (mode, device);
-    int			err;
+    int     err;
 
     if (status != NO_ERROR)
         return status;
@@ -687,16 +715,16 @@ status_t ALSAStreamOps::setDevice(int mode, uint32_t device)
         return NO_INIT;
     }
 
+    status = setPCMFormat(mDefaults->format);
+
     // Set the interleaved read and write format.
     err = snd_pcm_hw_params_set_access(mHandle, mHardwareParams,
                                        SND_PCM_ACCESS_RW_INTERLEAVED);
     if (err < 0) {
         LOGE("Unable to configure PCM read/write format: %s",
-             snd_strerror(err));
+            snd_strerror(err));
         return NO_INIT;
     }
-
-    status = setPCMFormat(mDefaults->format);
 
     //
     // Some devices do not have the default two channels.  Force an error to
@@ -719,32 +747,70 @@ status_t ALSAStreamOps::setDevice(int mode, uint32_t device)
     if (status != NO_ERROR)
         return status;
 
-    unsigned int     bufferTime;
-    unsigned int     periodTime;
+    snd_pcm_uframes_t bufferSize = mDefaults->bufferSize;
+    unsigned int latency = mDefaults->latency;
 
-    // Set the buffer time.
-    bufferTime = mDefaults->bufferTime;
-    err = snd_pcm_hw_params_set_buffer_time_near(mHandle,
-                                                 mHardwareParams,
-                                                 &bufferTime,
-                                                 0);
+    // Make sure we have at least the size we originally wanted
+    err = snd_pcm_hw_params_set_buffer_size(mHandle, mHardwareParams, bufferSize);
     if (err < 0) {
-        LOGE("Unable to set buffer time to %u usec: %s",
-             bufferTime, snd_strerror(err));
+        LOGE("Unable to set buffer size to %d:  %s",
+             (int)bufferSize, snd_strerror(err));
         return NO_INIT;
     }
 
-    // Set the period time (i.e. the number of frames)
-    periodTime = mDefaults->periodTime;
-    err = snd_pcm_hw_params_set_period_time_near(mHandle,
-                                                 mHardwareParams,
-                                                 &periodTime,
-                                                 0);
+    // Setup buffers for latency
+    err = snd_pcm_hw_params_set_buffer_time_near (mHandle, mHardwareParams,
+                                                  &latency, NULL);
     if (err < 0) {
-        LOGE("Unable to set period time to %u usec: %s",
-             periodTime, snd_strerror(err));
-        return NO_INIT;
+        /* That didn't work, set the period instead */
+        unsigned int periodTime = latency / 4;
+        err = snd_pcm_hw_params_set_period_time_near (mHandle, mHardwareParams,
+                                                      &periodTime, NULL);
+        if (err < 0) {
+            LOGE("Unable to set the period time for latency: %s", snd_strerror(err));
+            return NO_INIT;
+        }
+        snd_pcm_uframes_t periodSize;
+        err = snd_pcm_hw_params_get_period_size (mHardwareParams, &periodSize, NULL);
+        if (err < 0) {
+            LOGE("Unable to get the period size for latency: %s", snd_strerror(err));
+            return NO_INIT;
+        }
+        bufferSize = periodSize * 4;
+        if (bufferSize < mDefaults->bufferSize)
+            bufferSize = mDefaults->bufferSize;
+        err = snd_pcm_hw_params_set_buffer_size_near (mHandle, mHardwareParams, &bufferSize);
+        if (err < 0) {
+            LOGE("Unable to set the buffer size for latency: %s", snd_strerror(err));
+            return NO_INIT;
+        }
+    } else {
+        // OK, we got buffer time near what we expect. See what that did for bufferSize.
+        err = snd_pcm_hw_params_get_buffer_size (mHardwareParams, &bufferSize);
+        if (err < 0) {
+            LOGE("Unable to get the buffer size for latency: %s", snd_strerror(err));
+            return NO_INIT;
+        }
+        // Does set_buffer_time_near change the passed value? It should.
+        err = snd_pcm_hw_params_get_buffer_time (mHardwareParams, &latency, NULL);
+        if (err < 0) {
+            LOGE("Unable to get the buffer time for latency: %s", snd_strerror(err));
+            return NO_INIT;
+        }
+        unsigned int periodTime = latency / 4;
+        err = snd_pcm_hw_params_set_period_time_near (mHandle, mHardwareParams,
+                                                      &periodTime, NULL);
+        if (err < 0) {
+            LOGE("Unable to set the period time for latency: %s", snd_strerror(err));
+            return NO_INIT;
+        }
     }
+
+    LOGD("Buffer size: %d", (int)bufferSize);
+    LOGD("Latency: %d", (int)latency);
+
+    mDefaults->bufferSize = bufferSize;
+    mDefaults->latency = latency;
 
     // Commit the hardware parameters back to the device.
     err = snd_pcm_hw_params(mHandle, mHardwareParams);
@@ -761,49 +827,44 @@ status_t ALSAStreamOps::setDevice(int mode, uint32_t device)
 // ----------------------------------------------------------------------------
 
 AudioStreamOutALSA::AudioStreamOutALSA(AudioHardwareALSA *parent) :
-	mParent(parent),
-	mPowerLock(false)
+    mParent(parent),
+    mPowerLock(false)
 {
-    static StreamDefaults _defaults =
-    {
-        deviceName     : "AndroidPlayback",
+    static StreamDefaults _defaults = {
+        devicePrefix   : "AndroidPlayback",
         direction      : SND_PCM_STREAM_PLAYBACK,
-        format         : SND_PCM_FORMAT_S16_LE, // AudioSystem::PCM_16_BIT
+        format         : SND_PCM_FORMAT_S16_LE,   // AudioSystem::PCM_16_BIT
         channels       : 2,
         sampleRate     : 44100,
-        bufferTime     : 500000, // Ring buffer length in usec, 1/2 second
-        periodTime     : 100000, // Period time in usec
-    };
+        latency        : 250000,                  // Desired Delay in usec
+        bufferSize     : 16384,                   // Desired Number of samples
+        };
 
     setStreamDefaults(&_defaults);
 }
 
 AudioStreamOutALSA::~AudioStreamOutALSA()
 {
-	standby();
-	mParent->mOutput = NULL;
+    standby();
+    mParent->mOutput = NULL;
 }
 
 int AudioStreamOutALSA::channelCount() const
 {
-    int c;
-
-    c = ALSAStreamOps::channelCount();
+    int c = ALSAStreamOps::channelCount();
 
     // AudioMixer will seg fault if it doesn't have two channels.
     LOGW_IF(c != 2,
-            "AudioMixer expects two channels, but only %i found!", c);
+        "AudioMixer expects two channels, but only %i found!", c);
     return c;
 }
 
 status_t AudioStreamOutALSA::setVolume(float volume)
 {
-	if (! mParent->mMixer || mDevice < 0)
-		return NO_INIT;
+    if (! mParent->mMixer || ! mDevice)
+        return NO_INIT;
 
-	ALSAMixer::mixer_types mixer_type = static_cast<ALSAMixer::mixer_types>(mDevice);
-
-	return mParent->mMixer->setVolume (mixer_type, volume);
+    return mParent->mMixer->setVolume (mDevice, volume);
 }
 
 ssize_t AudioStreamOutALSA::write(const void *buffer, size_t bytes)
@@ -814,7 +875,7 @@ ssize_t AudioStreamOutALSA::write(const void *buffer, size_t bytes)
     AutoMutex lock(mLock);
 
     if (isStandby())
-    	return 0;
+        return 0;
 
     if (!mPowerLock) {
         acquire_wake_lock (PARTIAL_WAKE_LOCK, "AudioLock");
@@ -841,47 +902,43 @@ status_t AudioStreamOutALSA::dump(int fd, const Vector<String16>& args)
 
 status_t AudioStreamOutALSA::setDevice(int mode, uint32_t newDevice)
 {
-    uint32_t dev;
-
-    //
-    // Output to only one device.  The new device is the first selected bit
-    // in newDevice (per IAudioFlinger::ROUTE_*).
-    //
-    // It's possible to not output to any device (i.e. newDevice is 0).
-    //
-    dev = newDevice ? (ffs(static_cast<int>(newDevice)) - 1) : -1;
-
     AutoMutex lock(mLock);
 
-    return ALSAStreamOps::setDevice(mode, dev);
+    return ALSAStreamOps::setDevice(mode, newDevice);
 }
 
-const char *AudioStreamOutALSA::deviceName(int mode, int device)
+const char *AudioStreamOutALSA::deviceName(int mode, uint32_t device)
 {
-    static char devString[PROPERTY_VALUE_MAX];
-	int hasDevExt = 0;
+    static char devString[ALSA_NAME_MAX];
+    int dev;
+    int hasDevExt = 0;
 
-	strcpy (devString, mDefaults->deviceName);
+    strcpy (devString, mDefaults->devicePrefix);
 
-    if (device >= 0 && device < deviceSuffixLen) {
-        strcat (devString, deviceSuffix[device]);
-        hasDevExt = 1;
-    }
+    for (dev=0; device; dev++)
+        if (device & (1 << dev)) {
+            /* Don't go past the end of our list */
+            if (dev >= deviceSuffixLen)
+                break;
+            ALSA_STRCAT (devString, deviceSuffix[dev]);
+            device &= ~(1 << dev);
+            hasDevExt = 1;
+        }
 
-	if (hasDevExt)
-	    switch (mode) {
-			case AudioSystem::MODE_NORMAL:
-		        strcat (devString, "_normal");
-				break;
-	        case AudioSystem::MODE_RINGTONE:
-		        strcat (devString, "_ringtone");
-				break;
-	        case AudioSystem::MODE_IN_CALL:
-		        strcat (devString, "_incall");
-				break;
-	    };
+    if (hasDevExt)
+        switch (mode) {
+            case AudioSystem::MODE_NORMAL:
+                ALSA_STRCAT (devString, "_normal");
+                break;
+            case AudioSystem::MODE_RINGTONE:
+                ALSA_STRCAT (devString, "_ringtone");
+                break;
+            case AudioSystem::MODE_IN_CALL:
+                ALSA_STRCAT (devString, "_incall");
+                break;
+        };
 
-	return devString;
+    return devString;
 }
 
 status_t AudioStreamOutALSA::standby()
@@ -904,36 +961,43 @@ bool AudioStreamOutALSA::isStandby()
     return (!mHandle);
 }
 
+#define USEC_TO_MSEC(x) ((x + 999) / 1000)
+
+uint32_t AudioStreamOutALSA::latency() const
+{
+    // Android wants latency in milliseconds.
+    return USEC_TO_MSEC (mDefaults->latency);
+}
+
 // ----------------------------------------------------------------------------
 
 AudioStreamInALSA::AudioStreamInALSA(AudioHardwareALSA *parent) :
-	mParent(parent)
+    mParent(parent)
 {
-    static StreamDefaults _defaults =
-    {
-        deviceName     : "AndroidRecord",
+    static StreamDefaults _defaults = {
+        devicePrefix   : "AndroidRecord",
         direction      : SND_PCM_STREAM_CAPTURE,
-        format         : SND_PCM_FORMAT_S16_LE, // AudioSystem::PCM_16_BIT
+        format         : SND_PCM_FORMAT_S16_LE,   // AudioSystem::PCM_16_BIT
         channels       : 1,
         sampleRate     : AudioRecord::DEFAULT_SAMPLE_RATE,
-        bufferTime     : 500000, // Ring buffer length in usec, 1/2 second
-        periodTime     : 100000, // Period time in usec
-    };
+        latency        : 250000,                  // Desired Delay in usec
+        bufferSize     : 16384,                   // Desired Number of samples
+        };
 
     setStreamDefaults(&_defaults);
 }
 
 AudioStreamInALSA::~AudioStreamInALSA()
 {
-	mParent->mInput = NULL;
+    mParent->mInput = NULL;
 }
 
 status_t AudioStreamInALSA::setGain(float gain)
 {
-	if (mParent->mMixer)
-		return mParent->mMixer->setMasterGain (gain);
-	else
-		return NO_INIT;
+    if (mParent->mMixer)
+        return mParent->mMixer->setMasterGain (gain);
+    else
+        return NO_INIT;
 }
 
 ssize_t AudioStreamInALSA::read(void *buffer, ssize_t bytes)
@@ -962,40 +1026,53 @@ status_t AudioStreamInALSA::setDevice(int mode, uint32_t newDevice)
 {
     AutoMutex lock(mLock);
 
+    return ALSAStreamOps::setDevice(mode, newDevice);
+}
+
+const char *AudioStreamInALSA::deviceName(int mode, uint32_t device)
+{
+    static char devString[ALSA_NAME_MAX];
+
+    strcpy (devString, mDefaults->devicePrefix);
+
     // The AudioHardwareALSA API does not allow one to set the input routing.
     // Only one input device (the microphone) is currently supported.
     //
-    return ALSAStreamOps::setDevice(mode, AudioRecord::MIC_INPUT);
-}
-
-const char *AudioStreamInALSA::deviceName(int mode, int device)
-{
-    static char devString[PROPERTY_VALUE_MAX];
-
-	strcpy (devString, mDefaults->deviceName);
     strcat (devString, "_Microphone");
 
     return devString;
 }
 
+status_t AudioStreamInALSA::standby()
+{
+    AutoMutex lock(mLock);
+
+    return NO_ERROR;
+}
+
 // ----------------------------------------------------------------------------
 
-struct ALSAMixer::mixer_info_t {
-	mixer_info_t() :
-	    elem(0), min(0), max(100), mute(false)
-	{
-	}
-	snd_mixer_elem_t	*elem;
-	long			 min;
-	long			 max;
-	long			 volume;
-	bool			 mute;
-	char			 name[PROPERTY_VALUE_MAX];
+struct mixer_info_t
+{
+    mixer_info_t() :
+        elem(0),
+        min(SND_MIXER_VOL_RANGE_MIN),
+        max(SND_MIXER_VOL_RANGE_MAX),
+        mute(false)
+    {
+    }
+
+    snd_mixer_elem_t *elem;
+    long              min;
+    long              max;
+    long              volume;
+    bool              mute;
+    char              name[ALSA_NAME_MAX];
 };
 
 static int initMixer (snd_mixer_t **mixer, const char *name)
 {
-	int err;
+    int err;
 
     if ((err = snd_mixer_open(mixer, 0)) < 0) {
         LOGE("Unable to open mixer: %s", snd_strerror(err));
@@ -1004,159 +1081,168 @@ static int initMixer (snd_mixer_t **mixer, const char *name)
 
     if ((err = snd_mixer_attach(*mixer, name)) < 0) {
         LOGE("Unable to attach mixer to device %s: %s",
-             name, snd_strerror(err));
+            name, snd_strerror(err));
 
-	    if ((err = snd_mixer_attach(*mixer, "hw:00")) < 0) {
-	        LOGE("Unable to attach mixer to device default: %s",
-		             snd_strerror(err));
+        if ((err = snd_mixer_attach(*mixer, "hw:00")) < 0) {
+            LOGE("Unable to attach mixer to device default: %s",
+                snd_strerror(err));
 
-			snd_mixer_close (*mixer);
-			*mixer = NULL;
-			return err;
-	    }
+            snd_mixer_close (*mixer);
+            *mixer = NULL;
+            return err;
+        }
     }
 
     if ((err = snd_mixer_selem_register(*mixer, NULL, NULL)) < 0) {
         LOGE("Unable to register mixer elements: %s", snd_strerror(err));
-		snd_mixer_close (*mixer);
-		*mixer = NULL;
-		return err;
+        snd_mixer_close (*mixer);
+        *mixer = NULL;
+        return err;
     }
 
     // Get the mixer controls from the kernel
     if ((err = snd_mixer_load(*mixer)) < 0) {
         LOGE("Unable to load mixer elements: %s", snd_strerror(err));
-		snd_mixer_close (*mixer);
-		*mixer = NULL;
-		return err;
+        snd_mixer_close (*mixer);
+        *mixer = NULL;
+        return err;
     }
 
-	return 0;
+    return 0;
 }
 
 typedef int (*hasVolume_t)(snd_mixer_elem_t*);
 
-static hasVolume_t hasVolume[] =
-{
-	snd_mixer_selem_has_playback_volume,
-	snd_mixer_selem_has_capture_volume
+static const hasVolume_t hasVolume[] = {
+    snd_mixer_selem_has_playback_volume,
+    snd_mixer_selem_has_capture_volume
 };
 
 typedef int (*getVolumeRange_t)(snd_mixer_elem_t*, long int*, long int*);
 
-static getVolumeRange_t getVolumeRange[] =
-{
-	snd_mixer_selem_get_playback_volume_range,
-	snd_mixer_selem_get_capture_volume_range
+static const getVolumeRange_t getVolumeRange[] = {
+    snd_mixer_selem_get_playback_volume_range,
+    snd_mixer_selem_get_capture_volume_range
 };
 
 typedef int (*setVolume_t)(snd_mixer_elem_t*, long int);
 
-static setVolume_t setVol[] =
-{
-	snd_mixer_selem_set_playback_volume_all,
-	snd_mixer_selem_set_capture_volume_all
+static const setVolume_t setVol[] = {
+    snd_mixer_selem_set_playback_volume_all,
+    snd_mixer_selem_set_capture_volume_all
 };
 
 ALSAMixer::ALSAMixer()
 {
     int err;
 
-	initMixer (&mMixer[SND_PCM_STREAM_PLAYBACK], "AndroidPlayback");
-	initMixer (&mMixer[SND_PCM_STREAM_CAPTURE], "AndroidRecord");
+    initMixer (&mMixer[SND_PCM_STREAM_PLAYBACK], "AndroidPlayback");
+    initMixer (&mMixer[SND_PCM_STREAM_CAPTURE], "AndroidRecord");
 
     snd_mixer_selem_id_t *sid;
     snd_mixer_selem_id_alloca(&sid);
 
-	for (int i = 0; i <= SND_PCM_STREAM_LAST; i++) {
+    for (int i = 0; i <= SND_PCM_STREAM_LAST; i++) {
 
-		mMaster[i] = new mixer_info_t;
+        mixer_info_t *info = mixerMasterProp[i].mInfo = new mixer_info_t;
 
-	    property_get (mixerMasterProp[i].propName,
-					  mMaster[i]->name,
-					  mixerMasterProp[i].propDefault);
+        property_get (mixerMasterProp[i].propName,
+                      info->name,
+                      mixerMasterProp[i].propDefault);
 
-		for (snd_mixer_elem_t *elem = snd_mixer_first_elem(mMixer[i]);
-			 elem;
-	         elem = snd_mixer_elem_next(elem)) {
+        for (snd_mixer_elem_t *elem = snd_mixer_first_elem(mMixer[i]);
+             elem;
+             elem = snd_mixer_elem_next(elem)) {
 
-			if (!snd_mixer_selem_is_active(elem))
-				continue;
+            if (!snd_mixer_selem_is_active(elem))
+                continue;
 
-	        snd_mixer_selem_get_id(elem, sid);
+            snd_mixer_selem_get_id(elem, sid);
 
-	        // Find PCM playback volume control element.
-	        const char *elementName = snd_mixer_selem_id_get_name(sid);
+            // Find PCM playback volume control element.
+            const char *elementName = snd_mixer_selem_id_get_name(sid);
 
-			if (mMaster[i]->elem == NULL &&
-			    strcmp(elementName, mMaster[i]->name) == 0 &&
-			    hasVolume[i] (elem)) {
+            if (hasVolume[i] (elem))
+                LOGD ("Mixer: element name: '%s'", elementName);
 
-				mMaster[i]->elem = elem;
-				getVolumeRange[i] (elem, &mMaster[i]->min, &mMaster[i]->max);
-				mMaster[i]->volume = mMaster[i]->max;
-			    setVol[i] (elem, mMaster[i]->volume);
-			    if (i == SND_PCM_STREAM_PLAYBACK &&
-			    	snd_mixer_selem_has_playback_switch (elem))
-						snd_mixer_selem_set_playback_switch_all (elem, 1);
-			    break;
-			}
+            if (info->elem == NULL &&
+                strcmp(elementName, info->name) == 0 &&
+                hasVolume[i] (elem)) {
+
+                info->elem = elem;
+                getVolumeRange[i] (elem, &info->min, &info->max);
+                info->volume = info->max;
+                setVol[i] (elem, info->volume);
+                if (i == SND_PCM_STREAM_PLAYBACK &&
+                    snd_mixer_selem_has_playback_switch (elem))
+                    snd_mixer_selem_set_playback_switch_all (elem, 1);
+                break;
+            }
         }
 
-		for (int j = 0; j <= MIXER_LAST; j++) {
+        LOGD ("Mixer: master '%s' %s.", info->name, info->elem ? "found" : "not found");
 
-			mInfo[i][j] = new mixer_info_t;
+        for (int j = 0; mixerProp[j][i].routes; j++) {
 
-		    property_get (mixerProp[i][j].propName,
-						  mInfo[i][j]->name,
-						  mixerProp[i][j].propDefault);
+            mixer_info_t *info = mixerProp[j][i].mInfo = new mixer_info_t;
 
-		    for (snd_mixer_elem_t *elem = snd_mixer_first_elem(mMixer[i]);
-				 elem;
-		         elem = snd_mixer_elem_next(elem)) {
+            property_get (mixerProp[j][i].propName,
+                          info->name,
+                          mixerProp[j][i].propDefault);
 
-				if (!snd_mixer_selem_is_active(elem))
-					continue;
+            for (snd_mixer_elem_t *elem = snd_mixer_first_elem(mMixer[i]);
+                 elem;
+                 elem = snd_mixer_elem_next(elem)) {
 
-		        snd_mixer_selem_get_id(elem, sid);
+                if (!snd_mixer_selem_is_active(elem))
+                    continue;
 
-		        // Find PCM playback volume control element.
-		        const char *elementName = snd_mixer_selem_id_get_name(sid);
+                snd_mixer_selem_get_id(elem, sid);
 
-				if (mInfo[i][j]->elem == NULL &&
-				    strcmp(elementName, mInfo[i][j]->name) == 0 &&
-				    hasVolume[i] (elem)) {
+                // Find PCM playback volume control element.
+                const char *elementName = snd_mixer_selem_id_get_name(sid);
 
-					mInfo[i][j]->elem = elem;
-					getVolumeRange[i] (elem, &mInfo[i][j]->min, &mInfo[i][j]->max);
-					mInfo[i][j]->volume = mInfo[i][j]->max;
-				    setVol[i] (elem, mInfo[i][j]->volume);
-				    if (i == SND_PCM_STREAM_PLAYBACK &&
-				    	snd_mixer_selem_has_playback_switch (elem))
-							snd_mixer_selem_set_playback_switch_all (elem, 1);
-				    break;
-				}
-			}
-		}
-	}
-	LOGD("mixer initialized.");
+               if (info->elem == NULL &&
+                    strcmp(elementName, info->name) == 0 &&
+                    hasVolume[i] (elem)) {
+
+                    info->elem = elem;
+                    getVolumeRange[i] (elem, &info->min, &info->max);
+                    info->volume = info->max;
+                    setVol[i] (elem, info->volume);
+                    if (i == SND_PCM_STREAM_PLAYBACK &&
+                        snd_mixer_selem_has_playback_switch (elem))
+                        snd_mixer_selem_set_playback_switch_all (elem, 1);
+                    break;
+                }
+            }
+            LOGD ("Mixer: route '%s' %s.", info->name, info->elem ? "found" : "not found");
+        }
+    }
+    LOGD("mixer initialized.");
 }
 
 ALSAMixer::~ALSAMixer()
 {
-	for (int i = 0; i <= SND_PCM_STREAM_LAST; i++) {
-	    if (mMixer[i]) snd_mixer_close (mMixer[i]);
-	    if (mMaster[i]) delete mMaster[i];
-		for (int j = 0; j <= MIXER_LAST; j++) {
-		    if (mInfo[i][j]) delete mInfo[i][j];
-		}
-	}
+    for (int i = 0; i <= SND_PCM_STREAM_LAST; i++) {
+        if (mMixer[i]) snd_mixer_close (mMixer[i]);
+        if (mixerMasterProp[i].mInfo) {
+            delete mixerMasterProp[i].mInfo;
+            mixerMasterProp[i].mInfo = NULL;
+        }
+        for (int j = 0; mixerProp[j][i].routes; j++) {
+            if (mixerProp[j][i].mInfo) {
+                delete mixerProp[j][i].mInfo;
+                mixerProp[j][i].mInfo = NULL;
+            }
+        }
+    }
     LOGD("mixer destroyed.");
 }
 
 status_t ALSAMixer::setMasterVolume(float volume)
 {
-	mixer_info_t *info = mMaster[SND_PCM_STREAM_PLAYBACK];
+    mixer_info_t *info = mixerMasterProp[SND_PCM_STREAM_PLAYBACK].mInfo;
     if (!info || !info->elem) return INVALID_OPERATION;
 
     long minVol = info->min;
@@ -1175,7 +1261,7 @@ status_t ALSAMixer::setMasterVolume(float volume)
 
 status_t ALSAMixer::setMasterGain(float gain)
 {
-	mixer_info_t *info = mMaster[SND_PCM_STREAM_CAPTURE];
+    mixer_info_t *info = mixerMasterProp[SND_PCM_STREAM_CAPTURE].mInfo;
     if (!info || !info->elem) return INVALID_OPERATION;
 
     long minVol = info->min;
@@ -1192,108 +1278,134 @@ status_t ALSAMixer::setMasterGain(float gain)
     return NO_ERROR;
 }
 
-status_t ALSAMixer::setVolume(mixer_types mixer, float volume)
+status_t ALSAMixer::setVolume(uint32_t device, float volume)
 {
-	mixer_info_t *info = mInfo[mixer][SND_PCM_STREAM_PLAYBACK];
-    if (!info || !info->elem) return INVALID_OPERATION;
+    for (int j = 0; mixerProp[j][SND_PCM_STREAM_PLAYBACK].routes; j++)
+        if (mixerProp[j][SND_PCM_STREAM_PLAYBACK].routes & device) {
 
-    long minVol = info->min;
-    long maxVol = info->max;
+            mixer_info_t *info = mixerProp[j][SND_PCM_STREAM_PLAYBACK].mInfo;
+            if (!info || !info->elem) return INVALID_OPERATION;
 
-    // Make sure volume is between bounds.
-    long vol = minVol + volume * (maxVol - minVol);
-    if (vol > maxVol) vol = maxVol;
-    if (vol < minVol) vol = minVol;
+            long minVol = info->min;
+            long maxVol = info->max;
 
-    info->volume = vol;
-    snd_mixer_selem_set_playback_volume_all (info->elem, vol);
+            // Make sure volume is between bounds.
+            long vol = minVol + volume * (maxVol - minVol);
+            if (vol > maxVol) vol = maxVol;
+            if (vol < minVol) vol = minVol;
+
+            info->volume = vol;
+            snd_mixer_selem_set_playback_volume_all (info->elem, vol);
+        }
 
     return NO_ERROR;
 }
 
-status_t ALSAMixer::setGain(mixer_types mixer, float gain)
+status_t ALSAMixer::setGain(uint32_t device, float gain)
 {
-	mixer_info_t *info = mInfo[mixer][SND_PCM_STREAM_CAPTURE];
-    if (!info || !info->elem) return INVALID_OPERATION;
+    for (int j = 0; mixerProp[j][SND_PCM_STREAM_CAPTURE].routes; j++)
+        if (mixerProp[j][SND_PCM_STREAM_CAPTURE].routes & device) {
 
-    long minVol = info->min;
-    long maxVol = info->max;
+            mixer_info_t *info = mixerProp[j][SND_PCM_STREAM_CAPTURE].mInfo;
+            if (!info || !info->elem) return INVALID_OPERATION;
 
-    // Make sure volume is between bounds.
-    long vol = minVol + gain * (maxVol - minVol);
-    if (vol > maxVol) vol = maxVol;
-    if (vol < minVol) vol = minVol;
+            long minVol = info->min;
+            long maxVol = info->max;
 
-    info->volume = vol;
-    snd_mixer_selem_set_capture_volume_all (info->elem, vol);
+            // Make sure volume is between bounds.
+            long vol = minVol + gain * (maxVol - minVol);
+            if (vol > maxVol) vol = maxVol;
+            if (vol < minVol) vol = minVol;
+
+            info->volume = vol;
+            snd_mixer_selem_set_capture_volume_all (info->elem, vol);
+        }
 
     return NO_ERROR;
 }
 
-status_t ALSAMixer::setCaptureMuteState(mixer_types mixer, bool state)
+status_t ALSAMixer::setCaptureMuteState(uint32_t device, bool state)
 {
-	mixer_info_t *info = mInfo[mixer][SND_PCM_STREAM_CAPTURE];
-    if (!info || !info->elem) return INVALID_OPERATION;
+    for (int j = 0; mixerProp[j][SND_PCM_STREAM_CAPTURE].routes; j++)
+        if (mixerProp[j][SND_PCM_STREAM_CAPTURE].routes & device) {
 
-    if (info->mute == state) return NO_ERROR;
+            mixer_info_t *info = mixerProp[j][SND_PCM_STREAM_CAPTURE].mInfo;
+            if (!info || !info->elem) return INVALID_OPERATION;
 
-    if (snd_mixer_selem_has_capture_switch (info->elem)) {
+            if (snd_mixer_selem_has_capture_switch (info->elem)) {
 
-	int err = snd_mixer_selem_set_capture_switch_all (info->elem, static_cast<int>(!state));
-	if (err < 0) {
-	    LOGE("Unable to %s capture mixer switch %s",
-		 state ? "enable" : "disable", info->name);
-	    return INVALID_OPERATION;
-	}
-    }
+                int err = snd_mixer_selem_set_capture_switch_all (info->elem, static_cast<int>(!state));
+                if (err < 0) {
+                    LOGE("Unable to %s capture mixer switch %s",
+                        state ? "enable" : "disable", info->name);
+                    return INVALID_OPERATION;
+                }
+            }
 
-    info->mute = state;
+            info->mute = state;
+        }
+
     return NO_ERROR;
 }
 
-status_t ALSAMixer::getCaptureMuteState(mixer_types mixer, bool *state)
+status_t ALSAMixer::getCaptureMuteState(uint32_t device, bool *state)
 {
-	mixer_info_t *info = mInfo[mixer][SND_PCM_STREAM_CAPTURE];
-    if (!info || !info->elem) return INVALID_OPERATION;
-
     if (! state) return BAD_VALUE;
 
-    *state = info->mute;
+    for (int j = 0; mixerProp[j][SND_PCM_STREAM_CAPTURE].routes; j++)
+        if (mixerProp[j][SND_PCM_STREAM_CAPTURE].routes & device) {
+
+            mixer_info_t *info = mixerProp[j][SND_PCM_STREAM_CAPTURE].mInfo;
+            if (!info || !info->elem) return INVALID_OPERATION;
+
+            *state = info->mute;
+            return NO_ERROR;
+        }
+
+    return BAD_VALUE;
+}
+
+status_t ALSAMixer::setPlaybackMuteState(uint32_t device, bool state)
+{
+    for (int j = 0; mixerProp[j][SND_PCM_STREAM_PLAYBACK].routes; j++)
+        if (mixerProp[j][SND_PCM_STREAM_PLAYBACK].routes & device) {
+
+            mixer_info_t *info = mixerProp[j][SND_PCM_STREAM_PLAYBACK].mInfo;
+            if (!info || !info->elem) return INVALID_OPERATION;
+
+            if (snd_mixer_selem_has_playback_switch (info->elem)) {
+
+                int err = snd_mixer_selem_set_playback_switch_all (info->elem, static_cast<int>(!state));
+                if (err < 0) {
+                    LOGE("Unable to %s playback mixer switch %s",
+                        state ? "enable" : "disable", info->name);
+                    return INVALID_OPERATION;
+                }
+            }
+
+            info->mute = state;
+        }
 
     return NO_ERROR;
 }
 
-status_t ALSAMixer::setPlaybackMuteState(mixer_types mixer, bool state)
+status_t ALSAMixer::getPlaybackMuteState(uint32_t device, bool *state)
 {
-	mixer_info_t *info = mInfo[mixer][SND_PCM_STREAM_PLAYBACK];
-    if (!info || !info->elem) return INVALID_OPERATION;
-
-    if (snd_mixer_selem_has_playback_switch (info->elem)) {
-
-	int err = snd_mixer_selem_set_playback_switch_all (info->elem, static_cast<int>(!state));
-	if (err < 0) {
-	    LOGE("Unable to %s playback mixer switch %s",
-		 state ? "enable" : "disable", info->name);
-	    return INVALID_OPERATION;
-	}
-    }
-
-    info->mute = state;
-    return NO_ERROR;
-}
-
-status_t ALSAMixer::getPlaybackMuteState(mixer_types mixer, bool *state)
-{
-	mixer_info_t *info = mInfo[SND_PCM_STREAM_PLAYBACK][mixer];
-    if (!info || !info->elem) return INVALID_OPERATION;
-
     if (! state) return BAD_VALUE;
 
-    *state = info->mute;
+    for (int j = 0; mixerProp[j][SND_PCM_STREAM_PLAYBACK].routes; j++)
+        if (mixerProp[j][SND_PCM_STREAM_PLAYBACK].routes & device) {
 
-    return NO_ERROR;
+            mixer_info_t *info = mixerProp[j][SND_PCM_STREAM_PLAYBACK].mInfo;
+            if (!info || !info->elem) return INVALID_OPERATION;
+
+            *state = info->mute;
+            return NO_ERROR;
+        }
+
+    return BAD_VALUE;
 }
 
 // ----------------------------------------------------------------------------
 
-}; // namespace android
+};        // namespace android

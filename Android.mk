@@ -10,23 +10,22 @@ ifeq ($(strip $(BOARD_USES_ALSA_AUDIO)),true)
   include $(CLEAR_VARS)
 
   LOCAL_ARM_MODE := arm
-  LOCAL_CFLAGS = -fno-short-enums
+  LOCAL_CFLAGS := -D_POSIX_SOURCE
   LOCAL_WHOLE_STATIC_LIBRARIES := libasound
 
   LOCAL_C_INCLUDES += external/alsa-lib/include
 
-  LOCAL_SRC_FILES := \
-    AudioHardwareInterface.cpp \
-    AudioHardwareStub.cpp \
-    AudioHardwareALSA.cpp
+  LOCAL_SRC_FILES := AudioHardwareALSA.cpp
 
   LOCAL_MODULE := libaudio
+
+  LOCAL_STATIC_LIBRARIES += libaudiointerface
 
   LOCAL_SHARED_LIBRARIES := \
     libcutils \
     libutils \
     libmedia \
-    libhardware \
+    libhardware_legacy \
     libdl \
     libc
 
