@@ -35,6 +35,10 @@
 #include <alsa/asoundlib.h>
 #include "AudioHardwareALSA.h"
 
+#ifndef ALSA_DEFAULT_SAMPLE_RATE
+#define ALSA_DEFAULT_SAMPLE_RATE 44100 // in Hz
+#endif
+
 #define SND_MIXER_VOL_RANGE_MIN  (0)
 #define SND_MIXER_VOL_RANGE_MAX  (100)
 
@@ -46,7 +50,6 @@
 
 extern "C"
 {
-
     extern int ffs(int i);
 
     //
@@ -64,7 +67,6 @@ extern "C"
     android::AudioHardwareInterface *createAudioHardware(void) {
         return new android::AudioHardwareALSA();
     }
-
 }         // extern "C"
 
 namespace android
@@ -80,6 +82,8 @@ typedef AudioSystem::audio_routes audio_routes;
 #define ROUTE_BLUETOOTH_A2DP AudioSystem::ROUTE_BLUETOOTH_A2DP
 
 // ----------------------------------------------------------------------------
+
+static const int DEFAULT_SAMPLE_RATE = ALSA_DEFAULT_SAMPLE_RATE;
 
 static const char _nullALSADeviceName[] = "NULL_Device";
 
@@ -254,7 +258,8 @@ AudioStreamIn *
 AudioHardwareALSA::openInputStream(int      format,
                                    int      channelCount,
                                    uint32_t sampleRate,
-                                   status_t *status)
+                                   status_t *status,
+                                   AudioSystem::audio_in_acoustics acoustics)
 {
     AutoMutex lock(mLock);
 
@@ -269,8 +274,10 @@ AudioHardwareALSA::openInputStream(int      format,
     *status = in->set(format, channelCount, sampleRate);
     if (*status == NO_ERROR) {
         mInput = in;
-        // Now, actually open the device. Only 1 route used
-        mInput->setDevice(0, 0);
+        // Some information is expected to be available immediately after
+        // the device is open.
+        uint32_t routes = mRoutes[mMode];
+        mInput->setDevice(mMode, routes);    return mInput;
     }
     else {
         delete in;
@@ -739,7 +746,7 @@ status_t ALSAStreamOps::setDevice(int mode, uint32_t device)
         return status;
 
     // Don't check for failure; some devices do not support the default
-    // 44100 Hz rate.
+    // sample rate.
     sampleRate(mDefaults->sampleRate);
 
     // Disable hardware resampling.
@@ -824,6 +831,40 @@ status_t ALSAStreamOps::setDevice(int mode, uint32_t device)
     return status;
 }
 
+const char *ALSAStreamOps::deviceName(int mode, uint32_t device)
+{
+    static char devString[ALSA_NAME_MAX];
+    int dev;
+    int hasDevExt = 0;
+
+    strcpy (devString, mDefaults->devicePrefix);
+
+    for (dev=0; device; dev++)
+        if (device & (1 << dev)) {
+            /* Don't go past the end of our list */
+            if (dev >= deviceSuffixLen)
+                break;
+            ALSA_STRCAT (devString, deviceSuffix[dev]);
+            device &= ~(1 << dev);
+            hasDevExt = 1;
+        }
+
+    if (hasDevExt)
+        switch (mode) {
+            case AudioSystem::MODE_NORMAL:
+                ALSA_STRCAT (devString, "_normal");
+                break;
+            case AudioSystem::MODE_RINGTONE:
+                ALSA_STRCAT (devString, "_ringtone");
+                break;
+            case AudioSystem::MODE_IN_CALL:
+                ALSA_STRCAT (devString, "_incall");
+                break;
+        };
+
+    return devString;
+}
+
 // ----------------------------------------------------------------------------
 
 AudioStreamOutALSA::AudioStreamOutALSA(AudioHardwareALSA *parent) :
@@ -835,7 +876,7 @@ AudioStreamOutALSA::AudioStreamOutALSA(AudioHardwareALSA *parent) :
         direction      : SND_PCM_STREAM_PLAYBACK,
         format         : SND_PCM_FORMAT_S16_LE,   // AudioSystem::PCM_16_BIT
         channels       : 2,
-        sampleRate     : 44100,
+        sampleRate     : DEFAULT_SAMPLE_RATE,
         latency        : 250000,                  // Desired Delay in usec
         bufferSize     : 16384,                   // Desired Number of samples
         };
@@ -905,40 +946,6 @@ status_t AudioStreamOutALSA::setDevice(int mode, uint32_t newDevice)
     AutoMutex lock(mLock);
 
     return ALSAStreamOps::setDevice(mode, newDevice);
-}
-
-const char *AudioStreamOutALSA::deviceName(int mode, uint32_t device)
-{
-    static char devString[ALSA_NAME_MAX];
-    int dev;
-    int hasDevExt = 0;
-
-    strcpy (devString, mDefaults->devicePrefix);
-
-    for (dev=0; device; dev++)
-        if (device & (1 << dev)) {
-            /* Don't go past the end of our list */
-            if (dev >= deviceSuffixLen)
-                break;
-            ALSA_STRCAT (devString, deviceSuffix[dev]);
-            device &= ~(1 << dev);
-            hasDevExt = 1;
-        }
-
-    if (hasDevExt)
-        switch (mode) {
-            case AudioSystem::MODE_NORMAL:
-                ALSA_STRCAT (devString, "_normal");
-                break;
-            case AudioSystem::MODE_RINGTONE:
-                ALSA_STRCAT (devString, "_ringtone");
-                break;
-            case AudioSystem::MODE_IN_CALL:
-                ALSA_STRCAT (devString, "_incall");
-                break;
-        };
-
-    return devString;
 }
 
 status_t AudioStreamOutALSA::standby()
@@ -1027,20 +1034,6 @@ status_t AudioStreamInALSA::setDevice(int mode, uint32_t newDevice)
     AutoMutex lock(mLock);
 
     return ALSAStreamOps::setDevice(mode, newDevice);
-}
-
-const char *AudioStreamInALSA::deviceName(int mode, uint32_t device)
-{
-    static char devString[ALSA_NAME_MAX];
-
-    strcpy (devString, mDefaults->devicePrefix);
-
-    // The AudioHardwareALSA API does not allow one to set the input routing.
-    // Only one input device (the microphone) is currently supported.
-    //
-    strcat (devString, "_Microphone");
-
-    return devString;
 }
 
 status_t AudioStreamInALSA::standby()

@@ -82,7 +82,7 @@ namespace android
             const char             *streamName();
             virtual status_t        setDevice(int mode, uint32_t device);
 
-            virtual const char     *deviceName(int mode, uint32_t device) = 0;
+            const char             *deviceName(int mode, uint32_t device);
 
         protected:
             friend class AudioStreamOutALSA;
@@ -149,8 +149,6 @@ namespace android
 
             status_t                setVolume(float volume);
 
-            virtual const char     *deviceName(int mode, uint32_t device);
-
             status_t                standby();
             bool                    isStandby();
 
@@ -195,8 +193,6 @@ namespace android
             virtual status_t        setDevice(int mode, uint32_t newDevice);
 
             virtual status_t        setGain(float gain);
-
-            virtual const char     *deviceName(int mode, uint32_t device);
 
             virtual status_t        standby();
 
@@ -248,7 +244,8 @@ namespace android
                 int format,
                 int channelCount,
                 uint32_t sampleRate,
-                status_t *status);
+                status_t *status,
+                AudioSystem::audio_in_acoustics acoustics);
 
         protected:
             /**
