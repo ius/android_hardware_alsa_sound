@@ -53,6 +53,19 @@ namespace android
             snd_mixer_t            *mMixer[SND_PCM_STREAM_LAST+1];
     };
 
+    class ALSAControl
+    {
+        public:
+                                    ALSAControl(const char *device = "default");
+            virtual                ~ALSAControl();
+
+            status_t                get(const char *name, unsigned int &value, int index = 0);
+            status_t                set(const char *name, unsigned int value, int index = -1);
+
+        private:
+            snd_ctl_t              *mHandle;
+    };
+
     class ALSAStreamOps
     {
         public:
