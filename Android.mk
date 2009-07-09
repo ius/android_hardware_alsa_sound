@@ -29,9 +29,28 @@ ifeq ($(strip $(BOARD_USES_ALSA_AUDIO)),true)
     libcutils \
     libutils \
     libmedia \
+    libhardware \
     libhardware_legacy \
     libdl \
     libc
+
+  include $(BUILD_SHARED_LIBRARY)
+
+  include $(CLEAR_VARS)
+
+  LOCAL_PRELINK_MODULE := false
+
+  LOCAL_MODULE_PATH := $(TARGET_OUT_SHARED_LIBRARIES)/hw
+
+  LOCAL_CFLAGS := -D_POSIX_SOURCE
+
+  LOCAL_C_INCLUDES += external/alsa-lib/include
+
+  LOCAL_SRC_FILES:= acoustics_default.cpp
+
+  LOCAL_SHARED_LIBRARIES := liblog
+
+  LOCAL_MODULE:= acoustics.default
 
   include $(BUILD_SHARED_LIBRARY)
 

@@ -1,6 +1,6 @@
 /* AudioHardwareALSA.h
  **
- ** Copyright 2008, Wind River Systems
+ ** Copyright 2008-2009, Wind River Systems
  **
  ** Licensed under the Apache License, Version 2.0 (the "License");
  ** you may not use this file except in compliance with the License.
@@ -18,16 +18,39 @@
 #ifndef ANDROID_AUDIO_HARDWARE_ALSA_H
 #define ANDROID_AUDIO_HARDWARE_ALSA_H
 
-#include <stdint.h>
-#include <sys/types.h>
+#include <hardware_legacy/AudioHardwareBase.h>
+
 #include <alsa/asoundlib.h>
 
-#include <hardware_legacy/AudioHardwareBase.h>
+#include <hardware/hardware.h>
 
 namespace android
 {
-
     class AudioHardwareALSA;
+
+    /**
+     * The id of acoustics module
+     */
+#define ACOUSTICS_HARDWARE_MODULE_ID "acoustics"
+#define ACOUSTICS_HARDWARE_NAME "name"
+
+    struct acoustic_device_t {
+        hw_device_t common;
+
+        /**
+         * Set the provided acoustics for a particular ALSA pcm device.
+         *
+         * Returns: 0 on succes, error code on failure.
+         */
+        status_t (*set_acoustics)(snd_pcm_t *, AudioSystem::audio_in_acoustics);
+
+        /**
+         * Read callback with PCM data so that filtering may be applied.
+         *
+         * Returns: frames filtered on success, error code on failure.
+         */
+        ssize_t (*filter)(snd_pcm_t *, void *, ssize_t);
+    };
 
     // ----------------------------------------------------------------------------
 
@@ -80,7 +103,7 @@ namespace android
                 unsigned int        bufferSize;      // Size of sample buffer
             };
 
-                                    ALSAStreamOps();
+                                    ALSAStreamOps(AudioHardwareALSA *parent);
             virtual                ~ALSAStreamOps();
 
             status_t                set(int format,
@@ -111,9 +134,8 @@ namespace android
                 mDefaults = dev;
             }
 
-            Mutex                   mLock;
-
         private:
+            AudioHardwareALSA      *mParent;
             snd_pcm_t              *mHandle;
             snd_pcm_hw_params_t    *mHardwareParams;
             snd_pcm_sw_params_t    *mSoftwareParams;
@@ -164,16 +186,13 @@ namespace android
 
             status_t                standby();
             bool                    isStandby();
-
-        private:
-            AudioHardwareALSA      *mParent;
-            bool                    mPowerLock;
     };
 
     class AudioStreamInALSA : public AudioStreamIn, public ALSAStreamOps
     {
         public:
-                                    AudioStreamInALSA(AudioHardwareALSA *parent);
+                                    AudioStreamInALSA(AudioHardwareALSA *parent,
+                                                      AudioSystem::audio_in_acoustics acoustics);
             virtual                ~AudioStreamInALSA();
 
             status_t                set(int      format       = 0,
@@ -210,7 +229,7 @@ namespace android
             virtual status_t        standby();
 
         private:
-            AudioHardwareALSA *mParent;
+            AudioSystem::audio_in_acoustics mAcoustics;
     };
 
     class AudioHardwareALSA : public AudioHardwareBase
@@ -278,8 +297,11 @@ namespace android
             AudioStreamOutALSA *mOutput;
             AudioStreamInALSA  *mInput;
 
+            acoustic_device_t *mAcousticDevice;
+
         private:
             Mutex               mLock;
+            bool                mPowerLock;
     };
 
     // ----------------------------------------------------------------------------

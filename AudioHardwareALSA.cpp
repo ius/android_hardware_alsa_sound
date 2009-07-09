@@ -17,12 +17,11 @@
 
 #include <errno.h>
 #include <stdarg.h>
-#include <stdint.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <dlfcn.h>
 
 #define LOG_TAG "AudioHardwareALSA"
 #include <utils/Log.h>
@@ -32,8 +31,10 @@
 #include <media/AudioRecord.h>
 #include <hardware_legacy/power.h>
 
-#include <alsa/asoundlib.h>
 #include "AudioHardwareALSA.h"
+
+#undef FM_ROUTE_SUPPORT
+#undef DISABLE_HARWARE_RESAMPLING
 
 #ifndef ALSA_DEFAULT_SAMPLE_RATE
 #define ALSA_DEFAULT_SAMPLE_RATE 44100 // in Hz
@@ -50,8 +51,6 @@
 
 extern "C"
 {
-    extern int ffs(int i);
-
     //
     // Make sure this prototype is consistent with what's in
     // external/libasound/alsa-lib-1.0.16/src/pcm/pcm_null.c!
@@ -80,6 +79,9 @@ typedef AudioSystem::audio_routes audio_routes;
 #define ROUTE_BLUETOOTH_SCO  AudioSystem::ROUTE_BLUETOOTH_SCO
 #define ROUTE_HEADSET        AudioSystem::ROUTE_HEADSET
 #define ROUTE_BLUETOOTH_A2DP AudioSystem::ROUTE_BLUETOOTH_A2DP
+#ifdef FM_ROUTE_SUPPORT
+#define ROUTE_FM             AudioSystem::ROUTE_FM
+#endif
 
 // ----------------------------------------------------------------------------
 
@@ -116,6 +118,9 @@ static const char *deviceSuffix[] = {
     /* ROUTE_BLUETOOTH_SCO  */ "_Bluetooth",
     /* ROUTE_HEADSET        */ "_Headset",
     /* ROUTE_BLUETOOTH_A2DP */ "_Bluetooth-A2DP",
+#ifdef FM_ROUTE_SUPPORT
+    /* ROUTE_FM             */ "_FM",
+#endif
 };
 
 static const int deviceSuffixLen = (sizeof(deviceSuffix) / sizeof(char *));
@@ -128,14 +133,6 @@ struct alsa_properties_t
     const char         *propName;
     const char         *propDefault;
     mixer_info_t       *mInfo;
-};
-
-static alsa_properties_t masterPlaybackProp = {
-    ROUTE_ALL, "alsa.mixer.playback.master", "PCM", NULL
-};
-
-static alsa_properties_t masterCaptureProp = {
-    ROUTE_ALL, "alsa.mixer.capture.master", "Capture", NULL
 };
 
 static alsa_properties_t
@@ -166,6 +163,12 @@ mixerProp[][SND_PCM_STREAM_LAST+1] = {
         {ROUTE_BLUETOOTH_A2DP, "alsa.mixer.playback.bluetooth.a2dp", "Bluetooth A2DP",         NULL},
         {ROUTE_BLUETOOTH_A2DP, "alsa.mixer.capture.bluetooth.a2dp",  "Bluetooth A2DP Capture", NULL}
     },
+#ifdef FM_ROUTE_SUPPORT
+    {
+        {ROUTE_FM,             "alsa.mixer.playback.fm",             "FM", NULL},
+        {ROUTE_FM,             "alsa.mixer.capture.fm",              "",   NULL}
+    },
+#endif
     {
         {static_cast<audio_routes>(0), NULL, NULL, NULL},
         {static_cast<audio_routes>(0), NULL, NULL, NULL}
@@ -176,10 +179,24 @@ mixerProp[][SND_PCM_STREAM_LAST+1] = {
 
 AudioHardwareALSA::AudioHardwareALSA() :
     mOutput(0),
-    mInput(0)
+    mInput(0),
+    mAcousticDevice(0),
+    mPowerLock(false)
 {
     snd_lib_error_set_handler(&ALSAErrorHandler);
     mMixer = new ALSAMixer;
+
+    hw_module_t *module;
+    int err = hw_get_module(ACOUSTICS_HARDWARE_MODULE_ID,
+            (hw_module_t const**)&module);
+
+    if (err == 0) {
+        hw_device_t* device;
+        err = module->methods->open(module, ACOUSTICS_HARDWARE_NAME, &device);
+        if (err == 0) {
+            mAcousticDevice = (acoustic_device_t *)device;
+        }
+    }
 }
 
 AudioHardwareALSA::~AudioHardwareALSA()
@@ -187,6 +204,8 @@ AudioHardwareALSA::~AudioHardwareALSA()
     if (mOutput) delete mOutput;
     if (mInput) delete mInput;
     if (mMixer) delete mMixer;
+    if (mAcousticDevice)
+        mAcousticDevice->common.close(&mAcousticDevice->common);
 }
 
 status_t AudioHardwareALSA::initCheck()
@@ -199,8 +218,18 @@ status_t AudioHardwareALSA::initCheck()
 
 status_t AudioHardwareALSA::standby()
 {
+    AutoMutex lock(mLock);
+
     if (mOutput)
         return mOutput->standby();
+
+    if (mInput)
+        return mInput->standby();
+
+    if (mPowerLock) {
+        release_wake_lock ("AudioLock");
+        mPowerLock = false;
+    }
 
     return NO_ERROR;
 }
@@ -269,7 +298,7 @@ AudioHardwareALSA::openInputStream(int      format,
         return 0;
     }
 
-    AudioStreamInALSA *in = new AudioStreamInALSA(this);
+    AudioStreamInALSA *in = new AudioStreamInALSA(this, acoustics);
 
     *status = in->set(format, channelCount, sampleRate);
     if (*status == NO_ERROR) {
@@ -277,7 +306,7 @@ AudioHardwareALSA::openInputStream(int      format,
         // Some information is expected to be available immediately after
         // the device is open.
         uint32_t routes = mRoutes[mMode];
-        mInput->setDevice(mMode, routes);    return mInput;
+        mInput->setDevice(mMode, routes);
     }
     else {
         delete in;
@@ -321,7 +350,8 @@ status_t AudioHardwareALSA::dump(int fd, const Vector<String16>& args)
 
 // ----------------------------------------------------------------------------
 
-ALSAStreamOps::ALSAStreamOps() :
+ALSAStreamOps::ALSAStreamOps(AudioHardwareALSA *parent) :
+    mParent(parent),
     mHandle(0),
     mHardwareParams(0),
     mSoftwareParams(0),
@@ -339,8 +369,6 @@ ALSAStreamOps::ALSAStreamOps() :
 
 ALSAStreamOps::~ALSAStreamOps()
 {
-    AutoMutex lock(mLock);
-
     close();
 
     if (mHardwareParams)
@@ -539,7 +567,7 @@ status_t ALSAStreamOps::open(int mode, uint32_t device)
 
     if (err < 0) {
         // None of the Android defined audio devices exist. Open a generic one.
-        devName = "hw:00,0";
+        devName = "default";
         err = snd_pcm_open(&mHandle, devName, mDefaults->direction, 0);
         if (err < 0) {
             // Last resort is the NULL device (i.e. the bit bucket).
@@ -722,8 +750,6 @@ status_t ALSAStreamOps::setDevice(int mode, uint32_t device)
         return NO_INIT;
     }
 
-    status = setPCMFormat(mDefaults->format);
-
     // Set the interleaved read and write format.
     err = snd_pcm_hw_params_set_access(mHandle, mHardwareParams,
                                        SND_PCM_ACCESS_RW_INTERLEAVED);
@@ -732,6 +758,8 @@ status_t ALSAStreamOps::setDevice(int mode, uint32_t device)
             snd_strerror(err));
         return NO_INIT;
     }
+
+    status = setPCMFormat(mDefaults->format);
 
     //
     // Some devices do not have the default two channels.  Force an error to
@@ -749,10 +777,12 @@ status_t ALSAStreamOps::setDevice(int mode, uint32_t device)
     // sample rate.
     sampleRate(mDefaults->sampleRate);
 
+#ifdef DISABLE_HARWARE_RESAMPLING
     // Disable hardware resampling.
     status = setHardwareResample(false);
     if (status != NO_ERROR)
         return status;
+#endif
 
     snd_pcm_uframes_t bufferSize = mDefaults->bufferSize;
     unsigned int latency = mDefaults->latency;
@@ -834,12 +864,11 @@ status_t ALSAStreamOps::setDevice(int mode, uint32_t device)
 const char *ALSAStreamOps::deviceName(int mode, uint32_t device)
 {
     static char devString[ALSA_NAME_MAX];
-    int dev;
     int hasDevExt = 0;
 
     strcpy (devString, mDefaults->devicePrefix);
 
-    for (dev=0; device; dev++)
+    for (int dev=0; device; dev++)
         if (device & (1 << dev)) {
             /* Don't go past the end of our list */
             if (dev >= deviceSuffixLen)
@@ -868,8 +897,7 @@ const char *ALSAStreamOps::deviceName(int mode, uint32_t device)
 // ----------------------------------------------------------------------------
 
 AudioStreamOutALSA::AudioStreamOutALSA(AudioHardwareALSA *parent) :
-    mParent(parent),
-    mPowerLock(false)
+    ALSAStreamOps(parent)
 {
     static StreamDefaults _defaults = {
         devicePrefix   : "AndroidPlayback",
@@ -913,27 +941,30 @@ ssize_t AudioStreamOutALSA::write(const void *buffer, size_t bytes)
     snd_pcm_sframes_t n;
     status_t          err;
 
-    AutoMutex lock(mLock);
+    AutoMutex lock(mParent->mLock);
 
     if (isStandby())
         return 0;
 
-    if (!mPowerLock) {
+    if (!mParent->mPowerLock) {
         acquire_wake_lock (PARTIAL_WAKE_LOCK, "AudioLock");
-        ALSAStreamOps::setDevice(mMode, mDevice);
-        mPowerLock = true;
+        setDevice(mMode, mDevice);
+        mParent->mPowerLock = true;
     }
 
     n = snd_pcm_writei(mHandle,
                        buffer,
                        snd_pcm_bytes_to_frames(mHandle, bytes));
-    if (n < 0 && mHandle) {
-        // snd_pcm_recover() will return 0 if successful in recovering from
-        // an error, or -errno if the error was unrecoverable.
-        n = snd_pcm_recover(mHandle, n, 0);
+    if (n < 0) {
+        if (mHandle)
+            // snd_pcm_recover() will return 0 if successful in recovering from
+            // an error, or -errno if the error was unrecoverable.
+            n = snd_pcm_recover(mHandle, n, 0);
+
+        return static_cast<ssize_t>(n);
     }
 
-    return static_cast<ssize_t>(n);
+    return static_cast<ssize_t>(snd_pcm_frames_to_bytes(mHandle, n));
 }
 
 status_t AudioStreamOutALSA::dump(int fd, const Vector<String16>& args)
@@ -943,22 +974,13 @@ status_t AudioStreamOutALSA::dump(int fd, const Vector<String16>& args)
 
 status_t AudioStreamOutALSA::setDevice(int mode, uint32_t newDevice)
 {
-    AutoMutex lock(mLock);
-
     return ALSAStreamOps::setDevice(mode, newDevice);
 }
 
 status_t AudioStreamOutALSA::standby()
 {
-    AutoMutex lock(mLock);
-
     if (mHandle)
         snd_pcm_drain (mHandle);
-
-    if (mPowerLock) {
-        release_wake_lock ("AudioLock");
-        mPowerLock = false;
-    }
 
     return NO_ERROR;
 }
@@ -978,8 +1000,10 @@ uint32_t AudioStreamOutALSA::latency() const
 
 // ----------------------------------------------------------------------------
 
-AudioStreamInALSA::AudioStreamInALSA(AudioHardwareALSA *parent) :
-    mParent(parent)
+AudioStreamInALSA::AudioStreamInALSA(AudioHardwareALSA *parent,
+                                     AudioSystem::audio_in_acoustics acoustics) :
+    ALSAStreamOps(parent),
+    mAcoustics(acoustics)
 {
     static StreamDefaults _defaults = {
         devicePrefix   : "AndroidRecord",
@@ -988,7 +1012,7 @@ AudioStreamInALSA::AudioStreamInALSA(AudioHardwareALSA *parent) :
         channels       : 1,
         sampleRate     : AudioRecord::DEFAULT_SAMPLE_RATE,
         latency        : 250000,                  // Desired Delay in usec
-        bufferSize     : 16384,                   // Desired Number of samples
+        bufferSize     : 2048,                    // Desired Number of samples
         };
 
     setStreamDefaults(&_defaults);
@@ -996,6 +1020,7 @@ AudioStreamInALSA::AudioStreamInALSA(AudioHardwareALSA *parent) :
 
 AudioStreamInALSA::~AudioStreamInALSA()
 {
+    standby();
     mParent->mInput = NULL;
 }
 
@@ -1009,19 +1034,36 @@ status_t AudioStreamInALSA::setGain(float gain)
 
 ssize_t AudioStreamInALSA::read(void *buffer, ssize_t bytes)
 {
-    snd_pcm_sframes_t n;
+    snd_pcm_sframes_t n, frames = snd_pcm_bytes_to_frames(mHandle, bytes);
     status_t          err;
 
-    AutoMutex lock(mLock);
+    AutoMutex lock(mParent->mLock);
 
-    n = snd_pcm_readi(mHandle,
-                      buffer,
-                      snd_pcm_bytes_to_frames(mHandle, bytes));
-    if (n < 0 && mHandle) {
-        n = snd_pcm_recover(mHandle, n, 0);
+    if (!mParent->mPowerLock) {
+        acquire_wake_lock (PARTIAL_WAKE_LOCK, "AudioLock");
+        setDevice(mMode, mDevice);
+        mParent->mPowerLock = true;
     }
 
-    return static_cast<ssize_t>(n);
+    n = snd_pcm_readi(mHandle, buffer, frames);
+    if (n < frames) {
+        if (mHandle) {
+            if (n < 0)
+                n = snd_pcm_recover(mHandle, n, 0);
+            else
+                n = snd_pcm_prepare(mHandle);
+        }
+        return static_cast<ssize_t>(n);
+    }
+
+    if (mParent->mAcousticDevice &&
+        mParent->mAcousticDevice->filter) {
+        n = mParent->mAcousticDevice->filter(mHandle, buffer, frames);
+        if (n < 0)
+            return static_cast<ssize_t>(n);
+    }
+
+    return static_cast<ssize_t>(snd_pcm_frames_to_bytes(mHandle, n));
 }
 
 status_t AudioStreamInALSA::dump(int fd, const Vector<String16>& args)
@@ -1031,15 +1073,16 @@ status_t AudioStreamInALSA::dump(int fd, const Vector<String16>& args)
 
 status_t AudioStreamInALSA::setDevice(int mode, uint32_t newDevice)
 {
-    AutoMutex lock(mLock);
+    status_t status = ALSAStreamOps::setDevice(mode, newDevice);
 
-    return ALSAStreamOps::setDevice(mode, newDevice);
+    if (status == NO_ERROR && mParent->mAcousticDevice)
+        status = mParent->mAcousticDevice->set_acoustics(mHandle, mAcoustics);
+
+    return status;
 }
 
 status_t AudioStreamInALSA::standby()
 {
-    AutoMutex lock(mLock);
-
     return NO_ERROR;
 }
 
