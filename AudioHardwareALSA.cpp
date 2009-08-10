@@ -221,10 +221,10 @@ status_t AudioHardwareALSA::standby()
     AutoMutex lock(mLock);
 
     if (mOutput)
-        return mOutput->standby();
+        mOutput->standby();
 
     if (mInput)
-        return mInput->standby();
+        mInput->standby();
 
     if (mPowerLock) {
         release_wake_lock ("AudioLock");
@@ -611,38 +611,39 @@ status_t ALSAStreamOps::setSoftwareParams()
 
     snd_pcm_uframes_t bufferSize = 0;
     snd_pcm_uframes_t periodSize = 0;
-    snd_pcm_uframes_t startThreshold;
+    snd_pcm_uframes_t startThreshold, stopThreshold;
 
     // Configure ALSA to start the transfer when the buffer is almost full.
     snd_pcm_get_params(mHandle, &bufferSize, &periodSize);
 
     if (mDefaults->direction == SND_PCM_STREAM_PLAYBACK) {
         // For playback, configure ALSA to start the transfer when the
-        // buffer is almost full.
-        startThreshold = (bufferSize / periodSize) * periodSize;
+        // buffer is full.
+        startThreshold = bufferSize - periodSize;
+        stopThreshold = bufferSize;
     }
     else {
         // For recording, configure ALSA to start the transfer on the
         // first frame.
         startThreshold = 1;
-    }
+        stopThreshold = (bufferSize / periodSize) * periodSize;
+}
 
     err = snd_pcm_sw_params_set_start_threshold(mHandle,
-        mSoftwareParams,
-        startThreshold);
+                                                mSoftwareParams,
+                                                startThreshold);
     if (err < 0) {
         LOGE("Unable to set start threshold to %lu frames: %s",
             startThreshold, snd_strerror(err));
         return NO_INIT;
     }
 
-    // Stop the transfer when the buffer is full.
     err = snd_pcm_sw_params_set_stop_threshold(mHandle,
                                                mSoftwareParams,
-                                               bufferSize);
+                                               stopThreshold);
     if (err < 0) {
         LOGE("Unable to set stop threshold to %lu frames: %s",
-            bufferSize, snd_strerror(err));
+            stopThreshold, snd_strerror(err));
         return NO_INIT;
     }
 
@@ -905,8 +906,8 @@ AudioStreamOutALSA::AudioStreamOutALSA(AudioHardwareALSA *parent) :
         format         : SND_PCM_FORMAT_S16_LE,   // AudioSystem::PCM_16_BIT
         channels       : 2,
         sampleRate     : DEFAULT_SAMPLE_RATE,
-        latency        : 250000,                  // Desired Delay in usec
-        bufferSize     : 16384,                   // Desired Number of samples
+        latency        : 200000,                  // Desired Delay in usec
+        bufferSize     : DEFAULT_SAMPLE_RATE / 5, // Desired Number of samples
         };
 
     setStreamDefaults(&_defaults);
@@ -939,32 +940,46 @@ status_t AudioStreamOutALSA::setVolume(float volume)
 ssize_t AudioStreamOutALSA::write(const void *buffer, size_t bytes)
 {
     snd_pcm_sframes_t n;
+    size_t            sent = 0;
     status_t          err;
 
-    AutoMutex lock(mParent->mLock);
+    /* Scope for lock */ {
+        AutoMutex lock(mParent->mLock);
 
-    if (isStandby())
-        return 0;
+        if (isStandby())
+            return 0;
 
-    if (!mParent->mPowerLock) {
-        acquire_wake_lock (PARTIAL_WAKE_LOCK, "AudioLock");
-        setDevice(mMode, mDevice);
-        mParent->mPowerLock = true;
+        if (!mParent->mPowerLock) {
+            acquire_wake_lock (PARTIAL_WAKE_LOCK, "AudioLock");
+            setDevice(mMode, mDevice);
+            mParent->mPowerLock = true;
+        }
     }
 
-    n = snd_pcm_writei(mHandle,
-                       buffer,
-                       snd_pcm_bytes_to_frames(mHandle, bytes));
-    if (n < 0) {
-        if (mHandle)
-            // snd_pcm_recover() will return 0 if successful in recovering from
-            // an error, or -errno if the error was unrecoverable.
-            n = snd_pcm_recover(mHandle, n, 0);
+    do {
+        n = snd_pcm_writei(mHandle,
+                           (char *)buffer + sent,
+                           snd_pcm_bytes_to_frames(mHandle, bytes));
+        if (n == -EBADFD) {
+            // Somehow the stream is in a bad state. The driver probably
+            // has a bug and snd_pcm_recover() doesn't seem to handle this.
+            setDevice(mMode, mDevice);
+        }
+        else if (n < 0) {
+            if (mHandle) {
+                // snd_pcm_recover() will return 0 if successful in recovering from
+                // an error, or -errno if the error was unrecoverable.
+                n = snd_pcm_recover(mHandle, n, 1);
+                if (n)
+                    return static_cast<ssize_t>(n);
+            }
+        }
+        else
+            sent += static_cast<ssize_t>(snd_pcm_frames_to_bytes(mHandle, n));
 
-        return static_cast<ssize_t>(n);
-    }
+    } while (mHandle && sent < bytes);
 
-    return static_cast<ssize_t>(snd_pcm_frames_to_bytes(mHandle, n));
+    return sent;
 }
 
 status_t AudioStreamOutALSA::dump(int fd, const Vector<String16>& args)
@@ -1037,12 +1052,14 @@ ssize_t AudioStreamInALSA::read(void *buffer, ssize_t bytes)
     snd_pcm_sframes_t n, frames = snd_pcm_bytes_to_frames(mHandle, bytes);
     status_t          err;
 
-    AutoMutex lock(mParent->mLock);
+    /* Scope for lock */ {
+        AutoMutex lock(mParent->mLock);
 
-    if (!mParent->mPowerLock) {
-        acquire_wake_lock (PARTIAL_WAKE_LOCK, "AudioLock");
-        setDevice(mMode, mDevice);
-        mParent->mPowerLock = true;
+        if (!mParent->mPowerLock) {
+            acquire_wake_lock (PARTIAL_WAKE_LOCK, "AudioLock");
+            setDevice(mMode, mDevice);
+            mParent->mPowerLock = true;
+        }
     }
 
     n = snd_pcm_readi(mHandle, buffer, frames);
