@@ -284,13 +284,20 @@ AudioHardwareALSA::openOutputStream(int format,
 }
 
 AudioStreamIn *
-AudioHardwareALSA::openInputStream(int      format,
+AudioHardwareALSA::openInputStream(int      inputSource,
+                                   int      format,
                                    int      channelCount,
                                    uint32_t sampleRate,
                                    status_t *status,
                                    AudioSystem::audio_in_acoustics acoustics)
 {
     AutoMutex lock(mLock);
+
+    // check for valid input source
+    if ((inputSource < AudioRecord::DEFAULT_INPUT) ||
+        (inputSource >= AudioRecord::NUM_INPUT_SOURCES)) {
+        return 0;
+    }
 
     // only one input stream allowed
     if (mInput) {

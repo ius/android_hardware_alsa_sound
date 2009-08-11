@@ -273,6 +273,7 @@ namespace android
 
             /** This method creates and opens the audio hardware input stream */
             virtual AudioStreamIn*  openInputStream(
+                int inputSource,
                 int format,
                 int channelCount,
                 uint32_t sampleRate,
