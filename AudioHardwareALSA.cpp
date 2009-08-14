@@ -33,7 +33,6 @@
 
 #include "AudioHardwareALSA.h"
 
-#undef FM_ROUTE_SUPPORT
 #undef DISABLE_HARWARE_RESAMPLING
 
 #ifndef ALSA_DEFAULT_SAMPLE_RATE
