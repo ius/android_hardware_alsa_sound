@@ -180,8 +180,7 @@ mixerProp[][SND_PCM_STREAM_LAST+1] = {
 AudioHardwareALSA::AudioHardwareALSA() :
     mOutput(0),
     mInput(0),
-    mAcousticDevice(0),
-    mPowerLock(false)
+    mAcousticDevice(0)
 {
     snd_lib_error_set_handler(&ALSAErrorHandler);
     mMixer = new ALSAMixer;
@@ -214,24 +213,6 @@ status_t AudioHardwareALSA::initCheck()
         return NO_ERROR;
     else
         return NO_INIT;
-}
-
-status_t AudioHardwareALSA::standby()
-{
-    AutoMutex lock(mLock);
-
-    if (mOutput)
-        mOutput->standby();
-
-    if (mInput)
-        mInput->standby();
-
-    if (mPowerLock) {
-        release_wake_lock ("AudioLock");
-        mPowerLock = false;
-    }
-
-    return NO_ERROR;
 }
 
 status_t AudioHardwareALSA::setVoiceVolume(float volume)
@@ -273,8 +254,7 @@ AudioHardwareALSA::openOutputStream(int format,
         mOutput = out;
         // Some information is expected to be available immediately after
         // the device is open.
-        uint32_t routes = mRoutes[mMode];
-        mOutput->setDevice(mMode, routes);
+        *status = mOutput->setDevice(mMode, mRoutes[mMode]);
     }
     else {
         delete out;
@@ -291,13 +271,13 @@ AudioHardwareALSA::openInputStream(int      inputSource,
                                    status_t *status,
                                    AudioSystem::audio_in_acoustics acoustics)
 {
-    AutoMutex lock(mLock);
-
     // check for valid input source
     if ((inputSource < AudioRecord::DEFAULT_INPUT) ||
         (inputSource >= AudioRecord::NUM_INPUT_SOURCES)) {
         return 0;
     }
+
+    AutoMutex lock(mLock);
 
     // only one input stream allowed
     if (mInput) {
@@ -312,26 +292,23 @@ AudioHardwareALSA::openInputStream(int      inputSource,
         mInput = in;
         // Some information is expected to be available immediately after
         // the device is open.
-        uint32_t routes = mRoutes[mMode];
-        mInput->setDevice(mMode, routes);
+        *status = mInput->setDevice(mMode, mRoutes[mMode]);
     }
     else {
         delete in;
     }
+
     return mInput;
 }
 
 status_t AudioHardwareALSA::doRouting()
 {
-    uint32_t routes;
-
     AutoMutex lock(mLock);
 
-    if (mOutput) {
-        routes = mRoutes[mMode];
-        return mOutput->setDevice(mMode, routes);
-    }
-    return NO_INIT;
+    if (!mOutput)
+        return NO_INIT;
+
+    return mOutput->setDevice(mMode, mRoutes[mMode]);
 }
 
 status_t AudioHardwareALSA::setMicMute(bool state)
@@ -363,7 +340,8 @@ ALSAStreamOps::ALSAStreamOps(AudioHardwareALSA *parent) :
     mHardwareParams(0),
     mSoftwareParams(0),
     mMode(-1),
-    mDevice(0)
+    mDevice(0),
+    mPowerLock(false)
 {
     if (snd_pcm_hw_params_malloc(&mHardwareParams) < 0) {
         LOG_ALWAYS_FATAL("Failed to allocate ALSA hardware parameters!");
@@ -376,6 +354,8 @@ ALSAStreamOps::ALSAStreamOps(AudioHardwareALSA *parent) :
 
 ALSAStreamOps::~ALSAStreamOps()
 {
+    AutoMutex lock(mLock);
+
     close();
 
     if (mHardwareParams)
@@ -389,10 +369,10 @@ status_t ALSAStreamOps::set(int      format,
                             int      channels,
                             uint32_t rate)
 {
-    if (channels != 0)
+    if (channels > 0)
         mDefaults->channels = channels;
 
-    if (rate != 0)
+    if (rate > 0)
         mDefaults->sampleRate = rate;
 
     switch(format) {
@@ -421,8 +401,8 @@ uint32_t ALSAStreamOps::sampleRate() const
     unsigned int rate;
     int err;
 
-    if (! mHandle)
-        return NO_INIT;
+    if (!mHandle)
+        return mDefaults->sampleRate;
 
     return snd_pcm_hw_params_get_rate(mHardwareParams, &rate, 0) < 0
         ? 0 : static_cast<uint32_t>(rate);
@@ -457,7 +437,7 @@ status_t ALSAStreamOps::sampleRate(uint32_t rate)
             rate, requestedRate);
     }
     else {
-        LOGD("Set %s sample rate to %u HZ", stream, requestedRate);
+        LOGV("Set %s sample rate to %u HZ", stream, requestedRate);
     }
     return NO_ERROR;
 }
@@ -467,20 +447,28 @@ status_t ALSAStreamOps::sampleRate(uint32_t rate)
 //
 size_t ALSAStreamOps::bufferSize() const
 {
-    int err;
-
     if (!mHandle)
-        return -1;
+        return NO_INIT;
 
     snd_pcm_uframes_t bufferSize = 0;
     snd_pcm_uframes_t periodSize = 0;
+    int err;
 
     err = snd_pcm_get_params(mHandle, &bufferSize, &periodSize);
 
     if (err < 0)
         return -1;
 
-    return static_cast<size_t>(snd_pcm_frames_to_bytes(mHandle, bufferSize));
+    size_t bytes = static_cast<size_t>(snd_pcm_frames_to_bytes(mHandle, bufferSize));
+
+    // Not sure when this happened, but unfortunately it now
+    // appears that the bufferSize must be reported as a
+    // power of 2. This might be the fault of 3rd party
+    // users.
+    for (size_t i = 1; (bytes & ~i) != 0; i<<=1)
+        bytes &= ~i;
+
+    return bytes;
 }
 
 int ALSAStreamOps::format() const
@@ -516,17 +504,17 @@ int ALSAStreamOps::format() const
 
 int ALSAStreamOps::channelCount() const
 {
+    if (!mHandle)
+        return mDefaults->channels;
+
     unsigned int val;
     int err;
-
-    if (!mHandle)
-        return -1;
 
     err = snd_pcm_hw_params_get_channels(mHardwareParams, &val);
     if (err < 0) {
         LOGE("Unable to get device channel count: %s",
             snd_strerror(err));
-        return -1;
+        return mDefaults->channels;
     }
 
     return val;
@@ -545,7 +533,7 @@ status_t ALSAStreamOps::channelCount(int channels) {
         return BAD_VALUE;
     }
 
-    LOGD("Using %i %s for %s.",
+    LOGV("Using %i %s for %s.",
         channels, channels == 1 ? "channel" : "channels", streamName());
 
     return NO_ERROR;
@@ -568,7 +556,7 @@ status_t ALSAStreamOps::open(int mode, uint32_t device)
         // See if there is a less specific name we can try.
         // Note: We are changing the contents of a const char * here.
         char *tail = strrchr(devName, '_');
-        if (! tail) break;
+        if (!tail) break;
         *tail = 0;
     }
 
@@ -595,11 +583,8 @@ void ALSAStreamOps::close()
     snd_pcm_t *handle = mHandle;
     mHandle = NULL;
 
-    if (handle) {
+    if (handle)
         snd_pcm_close(handle);
-        mMode   = -1;
-        mDevice = 0;
-    }
 }
 
 status_t ALSAStreamOps::setSoftwareParams()
@@ -633,7 +618,7 @@ status_t ALSAStreamOps::setSoftwareParams()
         // For recording, configure ALSA to start the transfer on the
         // first frame.
         startThreshold = 1;
-        stopThreshold = (bufferSize / periodSize) * periodSize;
+        stopThreshold = bufferSize;
 }
 
     err = snd_pcm_sw_params_set_start_threshold(mHandle,
@@ -699,7 +684,7 @@ status_t ALSAStreamOps::setPCMFormat(snd_pcm_format_t format)
         return NO_INIT;
     }
 
-    LOGD("Set %s PCM format to %s (%s)", streamName(), formatName, formatDesc);
+    LOGV("Set %s PCM format to %s (%s)", streamName(), formatName, formatDesc);
     return NO_ERROR;
 }
 
@@ -793,7 +778,6 @@ status_t ALSAStreamOps::setDevice(int mode, uint32_t device)
 #endif
 
     snd_pcm_uframes_t bufferSize = mDefaults->bufferSize;
-    unsigned int latency = mDefaults->latency;
 
     // Make sure we have at least the size we originally wanted
     err = snd_pcm_hw_params_set_buffer_size(mHandle, mHardwareParams, bufferSize);
@@ -802,6 +786,8 @@ status_t ALSAStreamOps::setDevice(int mode, uint32_t device)
              (int)bufferSize, snd_strerror(err));
         return NO_INIT;
     }
+
+    unsigned int latency = mDefaults->latency;
 
     // Setup buffers for latency
     err = snd_pcm_hw_params_set_buffer_time_near (mHandle, mHardwareParams,
@@ -851,8 +837,8 @@ status_t ALSAStreamOps::setDevice(int mode, uint32_t device)
         }
     }
 
-    LOGD("Buffer size: %d", (int)bufferSize);
-    LOGD("Latency: %d", (int)latency);
+    LOGV("Buffer size: %d", (int)bufferSize);
+    LOGV("Latency: %d", (int)latency);
 
     mDefaults->bufferSize = bufferSize;
     mDefaults->latency = latency;
@@ -918,6 +904,14 @@ AudioStreamOutALSA::AudioStreamOutALSA(AudioHardwareALSA *parent) :
         };
 
     setStreamDefaults(&_defaults);
+
+    snd_pcm_uframes_t bufferSize = mDefaults->bufferSize;
+
+    // See comment in bufferSize() method.
+    for (size_t i = 1; (bufferSize & ~i) != 0; i<<=1)
+        bufferSize &= ~i;
+
+    mDefaults->bufferSize = bufferSize;
 }
 
 AudioStreamOutALSA::~AudioStreamOutALSA()
@@ -938,7 +932,7 @@ int AudioStreamOutALSA::channelCount() const
 
 status_t AudioStreamOutALSA::setVolume(float volume)
 {
-    if (! mParent->mMixer || ! mDevice)
+    if (!mParent->mMixer || !mDevice)
         return NO_INIT;
 
     return mParent->mMixer->setVolume (mDevice, volume);
@@ -950,18 +944,15 @@ ssize_t AudioStreamOutALSA::write(const void *buffer, size_t bytes)
     size_t            sent = 0;
     status_t          err;
 
-    /* Scope for lock */ {
-        AutoMutex lock(mParent->mLock);
+    AutoMutex lock(mLock);
 
-        if (isStandby())
-            return 0;
-
-        if (!mParent->mPowerLock) {
-            acquire_wake_lock (PARTIAL_WAKE_LOCK, "AudioLock");
-            setDevice(mMode, mDevice);
-            mParent->mPowerLock = true;
-        }
+    if (!mPowerLock) {
+        acquire_wake_lock (PARTIAL_WAKE_LOCK, "AudioOutLock");
+        mPowerLock = true;
     }
+
+    if (!mHandle)
+        ALSAStreamOps::setDevice(mMode, mDevice);
 
     do {
         n = snd_pcm_writei(mHandle,
@@ -970,7 +961,7 @@ ssize_t AudioStreamOutALSA::write(const void *buffer, size_t bytes)
         if (n == -EBADFD) {
             // Somehow the stream is in a bad state. The driver probably
             // has a bug and snd_pcm_recover() doesn't seem to handle this.
-            setDevice(mMode, mDevice);
+            ALSAStreamOps::setDevice(mMode, mDevice);
         }
         else if (n < 0) {
             if (mHandle) {
@@ -996,20 +987,26 @@ status_t AudioStreamOutALSA::dump(int fd, const Vector<String16>& args)
 
 status_t AudioStreamOutALSA::setDevice(int mode, uint32_t newDevice)
 {
+    AutoMutex lock(mLock);
+
     return ALSAStreamOps::setDevice(mode, newDevice);
 }
 
 status_t AudioStreamOutALSA::standby()
 {
-    if (mHandle)
+    AutoMutex lock(mLock);
+
+    if (mHandle) {
         snd_pcm_drain (mHandle);
+        close();
+    }
+
+    if (mPowerLock) {
+        release_wake_lock ("AudioOutLock");
+        mPowerLock = false;
+    }
 
     return NO_ERROR;
-}
-
-bool AudioStreamOutALSA::isStandby()
-{
-    return (!mHandle);
 }
 
 #define USEC_TO_MSEC(x) ((x + 999) / 1000)
@@ -1059,15 +1056,15 @@ ssize_t AudioStreamInALSA::read(void *buffer, ssize_t bytes)
     snd_pcm_sframes_t n, frames = snd_pcm_bytes_to_frames(mHandle, bytes);
     status_t          err;
 
-    /* Scope for lock */ {
-        AutoMutex lock(mParent->mLock);
+    AutoMutex lock(mLock);
 
-        if (!mParent->mPowerLock) {
-            acquire_wake_lock (PARTIAL_WAKE_LOCK, "AudioLock");
-            setDevice(mMode, mDevice);
-            mParent->mPowerLock = true;
-        }
+    if (!mPowerLock) {
+        acquire_wake_lock (PARTIAL_WAKE_LOCK, "AudioInLock");
+        mPowerLock = true;
     }
+
+    if (!mHandle)
+        ALSAStreamOps::setDevice(mMode, mDevice);
 
     n = snd_pcm_readi(mHandle, buffer, frames);
     if (n < frames) {
@@ -1097,6 +1094,8 @@ status_t AudioStreamInALSA::dump(int fd, const Vector<String16>& args)
 
 status_t AudioStreamInALSA::setDevice(int mode, uint32_t newDevice)
 {
+    AutoMutex lock(mLock);
+
     status_t status = ALSAStreamOps::setDevice(mode, newDevice);
 
     if (status == NO_ERROR && mParent->mAcousticDevice)
@@ -1107,6 +1106,15 @@ status_t AudioStreamInALSA::setDevice(int mode, uint32_t newDevice)
 
 status_t AudioStreamInALSA::standby()
 {
+    AutoMutex lock(mLock);
+
+    close();
+
+    if (mPowerLock) {
+        release_wake_lock ("AudioInLock");
+        mPowerLock = false;
+    }
+
     return NO_ERROR;
 }
 
@@ -1222,9 +1230,6 @@ ALSAMixer::ALSAMixer()
             // Find PCM playback volume control element.
             const char *elementName = snd_mixer_selem_id_get_name(sid);
 
-            if (hasVolume[i] (elem))
-                LOGD ("Mixer: element name: '%s'", elementName);
-
             if (info->elem == NULL &&
                 strcmp(elementName, info->name) == 0 &&
                 hasVolume[i] (elem)) {
@@ -1240,7 +1245,7 @@ ALSAMixer::ALSAMixer()
             }
         }
 
-        LOGD ("Mixer: master '%s' %s.", info->name, info->elem ? "found" : "not found");
+        LOGV("Mixer: master '%s' %s.", info->name, info->elem ? "found" : "not found");
 
         for (int j = 0; mixerProp[j][i].routes; j++) {
 
@@ -1276,10 +1281,10 @@ ALSAMixer::ALSAMixer()
                     break;
                 }
             }
-            LOGD ("Mixer: route '%s' %s.", info->name, info->elem ? "found" : "not found");
+            LOGV("Mixer: route '%s' %s.", info->name, info->elem ? "found" : "not found");
         }
     }
-    LOGD("mixer initialized.");
+    LOGV("mixer initialized.");
 }
 
 ALSAMixer::~ALSAMixer()
@@ -1297,7 +1302,7 @@ ALSAMixer::~ALSAMixer()
             }
         }
     }
-    LOGD("mixer destroyed.");
+    LOGV("mixer destroyed.");
 }
 
 status_t ALSAMixer::setMasterVolume(float volume)
@@ -1410,7 +1415,7 @@ status_t ALSAMixer::setCaptureMuteState(uint32_t device, bool state)
 
 status_t ALSAMixer::getCaptureMuteState(uint32_t device, bool *state)
 {
-    if (! state) return BAD_VALUE;
+    if (!state) return BAD_VALUE;
 
     for (int j = 0; mixerProp[j][SND_PCM_STREAM_CAPTURE].routes; j++)
         if (mixerProp[j][SND_PCM_STREAM_CAPTURE].routes & device) {
@@ -1451,7 +1456,7 @@ status_t ALSAMixer::setPlaybackMuteState(uint32_t device, bool state)
 
 status_t ALSAMixer::getPlaybackMuteState(uint32_t device, bool *state)
 {
-    if (! state) return BAD_VALUE;
+    if (!state) return BAD_VALUE;
 
     for (int j = 0; mixerProp[j][SND_PCM_STREAM_PLAYBACK].routes; j++)
         if (mixerProp[j][SND_PCM_STREAM_PLAYBACK].routes & device) {

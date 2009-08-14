@@ -17,6 +17,10 @@ ifeq ($(strip $(BOARD_USES_ALSA_AUDIO)),true)
     LOCAL_CFLAGS += -DALSA_DEFAULT_SAMPLE_RATE=$(ALSA_DEFAULT_SAMPLE_RATE)
   endif
 
+  ifeq ($(strip $(BOARD_HAVE_FM_ROUTING)),true)
+    LOCAL_CFLAGS += -DFM_ROUTE_SUPPORT
+  endif
+
   LOCAL_C_INCLUDES += external/alsa-lib/include
 
   LOCAL_SRC_FILES := AudioHardwareALSA.cpp

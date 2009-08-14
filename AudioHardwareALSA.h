@@ -91,7 +91,10 @@ namespace android
 
     class ALSAStreamOps
     {
-        public:
+        protected:
+            friend class AudioStreamOutALSA;
+            friend class AudioStreamInALSA;
+
             struct StreamDefaults
             {
                 const char *        devicePrefix;
@@ -115,20 +118,17 @@ namespace android
             virtual int             format() const;
             virtual int             channelCount() const;
             status_t                channelCount(int channels);
-            const char             *streamName();
-            virtual status_t        setDevice(int mode, uint32_t device);
-
-            const char             *deviceName(int mode, uint32_t device);
-
-        protected:
-            friend class AudioStreamOutALSA;
-            friend class AudioStreamInALSA;
 
             status_t                open(int mode, uint32_t device);
             void                    close();
             status_t                setSoftwareParams();
             status_t                setPCMFormat(snd_pcm_format_t format);
             status_t                setHardwareResample(bool resample);
+
+            status_t                setDevice(int mode, uint32_t device);
+
+            const char             *streamName();
+            const char             *deviceName(int mode, uint32_t device);
 
             void                    setStreamDefaults(StreamDefaults *dev) {
                 mDefaults = dev;
@@ -143,7 +143,10 @@ namespace android
             uint32_t                mDevice;
 
             StreamDefaults         *mDefaults;
-    };
+
+            Mutex                   mLock;
+            bool                    mPowerLock;
+};
 
     // ----------------------------------------------------------------------------
 
@@ -180,12 +183,15 @@ namespace android
 
             virtual ssize_t         write(const void *buffer, size_t bytes);
             virtual status_t        dump(int fd, const Vector<String16>& args);
-            virtual status_t        setDevice(int mode, uint32_t newDevice);
 
             status_t                setVolume(float volume);
 
-            status_t                standby();
-            bool                    isStandby();
+            virtual status_t        standby();
+
+        protected:
+            friend class AudioHardwareALSA;
+
+            status_t                setDevice(int mode, uint32_t newDevice);
     };
 
     class AudioStreamInALSA : public AudioStreamIn, public ALSAStreamOps
@@ -222,11 +228,15 @@ namespace android
 
             virtual ssize_t         read(void* buffer, ssize_t bytes);
             virtual status_t        dump(int fd, const Vector<String16>& args);
-            virtual status_t        setDevice(int mode, uint32_t newDevice);
 
             virtual status_t        setGain(float gain);
 
             virtual status_t        standby();
+
+        protected:
+            friend class AudioHardwareALSA;
+
+            status_t                setDevice(int mode, uint32_t newDevice);
 
         private:
             AudioSystem::audio_in_acoustics mAcoustics;
@@ -243,12 +253,6 @@ namespace android
              * return status based on values defined in include/utils/Errors.h
              */
             virtual status_t        initCheck();
-
-            /**
-             * put the audio hardware into standby mode to conserve power. Returns
-             * status based on include/utils/Errors.h
-             */
-            virtual status_t        standby();
 
             /** set the audio volume of a voice call. Range is between 0.0 and 1.0 */
             virtual status_t        setVoiceVolume(float volume);
@@ -301,8 +305,7 @@ namespace android
             acoustic_device_t *mAcousticDevice;
 
         private:
-            Mutex               mLock;
-            bool                mPowerLock;
+            Mutex                   mLock;
     };
 
     // ----------------------------------------------------------------------------
