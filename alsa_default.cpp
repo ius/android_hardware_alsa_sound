@@ -93,8 +93,8 @@ static int s_device_close(hw_device_t* device)
 static const int DEFAULT_SAMPLE_RATE = ALSA_DEFAULT_SAMPLE_RATE;
 
 static const char *devicePrefix[SND_PCM_STREAM_LAST + 1] = {
-        /* SND_PCM_STREAM_PLAYBACK : */"AndroidOut",
-        /* SND_PCM_STREAM_CAPTURE  : */"AndroidIn",
+        /* SND_PCM_STREAM_PLAYBACK : */"AndroidPlayback",
+        /* SND_PCM_STREAM_CAPTURE  : */"AndroidCapture",
 };
 
 static alsa_handle_t _defaultsOut = {
@@ -146,12 +146,18 @@ static const int deviceSuffixLen = (sizeof(deviceSuffix)
 
 // ----------------------------------------------------------------------------
 
+snd_pcm_stream_t direction(alsa_handle_t *handle)
+{
+    return (handle->devices & AudioSystem::DEVICE_OUT_ALL) ? SND_PCM_STREAM_PLAYBACK
+            : SND_PCM_STREAM_CAPTURE;
+}
+
 const char *deviceName(alsa_handle_t *handle, uint32_t device, int mode)
 {
     static char devString[ALSA_NAME_MAX];
     int hasDevExt = 0;
 
-    strcpy(devString, devicePrefix[0]);
+    strcpy(devString, devicePrefix[direction(handle)]);
 
     for (int dev = 0; device && dev < deviceSuffixLen; dev++)
         if (device & deviceSuffix[dev].device) {
@@ -176,12 +182,6 @@ const char *deviceName(alsa_handle_t *handle, uint32_t device, int mode)
     };
 
     return devString;
-}
-
-snd_pcm_stream_t direction(alsa_handle_t *handle)
-{
-    return (handle->devices & AudioSystem::DEVICE_OUT_ALL) ? SND_PCM_STREAM_PLAYBACK
-            : SND_PCM_STREAM_CAPTURE;
 }
 
 const char *streamName(alsa_handle_t *handle)
