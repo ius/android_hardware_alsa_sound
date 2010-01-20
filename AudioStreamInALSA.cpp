@@ -121,7 +121,7 @@ status_t AudioStreamInALSA::close()
 
     if (mHandle && aDev) aDev->cleanup(aDev);
 
-    close();
+    ALSAStreamOps::close();
 
     if (mPowerLock) {
         release_wake_lock ("AudioInLock");

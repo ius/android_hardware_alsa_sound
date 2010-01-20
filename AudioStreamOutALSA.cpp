@@ -134,7 +134,7 @@ status_t AudioStreamOutALSA::close()
     AutoMutex lock(mLock);
 
     snd_pcm_drain (mHandle->handle);
-    close();
+    ALSAStreamOps::close();
 
     if (mPowerLock) {
         release_wake_lock ("AudioOutLock");
