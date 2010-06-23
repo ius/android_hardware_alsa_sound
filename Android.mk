@@ -46,6 +46,7 @@ endif
   include $(CLEAR_VARS)
 
   LOCAL_CFLAGS := -D_POSIX_SOURCE
+
 ifeq ($(BOARD_HAVE_BLUETOOTH),true)
   LOCAL_CFLAGS += -DWITH_A2DP
 endif

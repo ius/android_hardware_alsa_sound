@@ -74,7 +74,6 @@ mixerProp[][SND_PCM_STREAM_LAST+1] = {
     ALSA_PROP(AudioSystem::DEVICE_OUT_WIRED_HEADSET, "headset", "Headphone", "Capture"),
     ALSA_PROP(AudioSystem::DEVICE_OUT_BLUETOOTH_SCO, "bluetooth.sco", "Bluetooth", "Bluetooth Capture"),
     ALSA_PROP(AudioSystem::DEVICE_OUT_BLUETOOTH_A2DP, "bluetooth.a2dp", "Bluetooth A2DP", "Bluetooth A2DP Capture"),
-    ALSA_PROP(AudioSystem::DEVICE_OUT_FM_HEADPHONE, "fm", "FM", ""),
     ALSA_PROP(static_cast<AudioSystem::audio_devices>(0), "", NULL, NULL)
 };
 

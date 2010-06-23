@@ -138,7 +138,6 @@ static const device_suffix_t deviceSuffix[] = {
         {AudioSystem::DEVICE_OUT_BLUETOOTH_SCO,  "_Bluetooth"},
         {AudioSystem::DEVICE_OUT_WIRED_HEADSET,  "_Headset"},
         {AudioSystem::DEVICE_OUT_BLUETOOTH_A2DP, "_Bluetooth-A2DP"},
-        {AudioSystem::DEVICE_OUT_FM_HEADPHONE,   "_FM"},
 };
 
 static const int deviceSuffixLen = (sizeof(deviceSuffix)
@@ -278,8 +277,9 @@ status_t setHardwareParams(alsa_handle_t *handle)
 #endif
 
     // Make sure we have at least the size we originally wanted
-    err = snd_pcm_hw_params_set_buffer_size(handle->handle, hardwareParams,
-            bufferSize);
+    err = snd_pcm_hw_params_set_buffer_size_near(handle->handle, hardwareParams,
+            &bufferSize);
+
     if (err < 0) {
         LOGE("Unable to set buffer size to %d:  %s",
                 (int)bufferSize, snd_strerror(err));
