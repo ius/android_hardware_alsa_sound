@@ -47,7 +47,8 @@ static const int DEFAULT_SAMPLE_RATE = ALSA_DEFAULT_SAMPLE_RATE;
 // ----------------------------------------------------------------------------
 
 AudioStreamOutALSA::AudioStreamOutALSA(AudioHardwareALSA *parent, alsa_handle_t *handle) :
-    ALSAStreamOps(parent, handle)
+    ALSAStreamOps(parent, handle),
+    mFrameCount(0)
 {
 }
 
@@ -109,8 +110,10 @@ ssize_t AudioStreamOutALSA::write(const void *buffer, size_t bytes)
                 if (n) return static_cast<ssize_t>(n);
             }
         }
-        else
+        else {
+            mFrameCount += n;
             sent += static_cast<ssize_t>(snd_pcm_frames_to_bytes(mHandle->handle, n));
+        }
 
     } while (mHandle->handle && sent < bytes);
 
@@ -155,6 +158,8 @@ status_t AudioStreamOutALSA::standby()
         mPowerLock = false;
     }
 
+    mFrameCount = 0;
+
     return NO_ERROR;
 }
 
@@ -164,6 +169,14 @@ uint32_t AudioStreamOutALSA::latency() const
 {
     // Android wants latency in milliseconds.
     return USEC_TO_MSEC (mHandle->latency);
+}
+
+// return the number of audio frames written by the audio dsp to DAC since
+// the output has exited standby
+status_t AudioStreamOutALSA::getRenderPosition(uint32_t *dspFrames)
+{
+    *dspFrames = mFrameCount;
+    return NO_ERROR;
 }
 
 }       // namespace android

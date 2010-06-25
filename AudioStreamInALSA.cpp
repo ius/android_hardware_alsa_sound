@@ -40,6 +40,7 @@ AudioStreamInALSA::AudioStreamInALSA(AudioHardwareALSA *parent,
         alsa_handle_t *handle,
         AudioSystem::audio_in_acoustics audio_acoustics) :
     ALSAStreamOps(parent, handle),
+    mFramesLost(0),
     mAcoustics(audio_acoustics)
 {
     acoustic_device_t *aDev = acoustics();
@@ -141,6 +142,21 @@ status_t AudioStreamInALSA::standby()
     }
 
     return NO_ERROR;
+}
+
+void AudioStreamInALSA::resetFramesLost()
+{
+    AutoMutex lock(mLock);
+    mFramesLost = 0;
+}
+
+unsigned int AudioStreamInALSA::getInputFramesLost() const
+{
+    unsigned int count = mFramesLost;
+    // Stupid interface wants us to have a side effect of clearing the count
+    // but is defined as a const to prevent such a thing.
+    ((AudioStreamInALSA *)this)->resetFramesLost();
+    return count;
 }
 
 status_t AudioStreamInALSA::setAcousticParams(void *params)
