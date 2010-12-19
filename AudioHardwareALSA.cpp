@@ -63,7 +63,7 @@ static void ALSAErrorHandler(const char *file,
     l = snprintf(buf, BUFSIZ, "%s:%i:(%s) ", file, line, function);
     vsnprintf(buf + l, BUFSIZ - l, fmt, arg);
     buf[BUFSIZ-1] = '\0';
-    LOG(LOG_ERROR, "ALSALib", buf);
+    LOG(LOG_ERROR, "ALSALib", "%s", buf);
     va_end(arg);
 }
 
